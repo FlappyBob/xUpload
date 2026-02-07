@@ -35,7 +35,14 @@ import type {
   UploadHistoryEntry,
   XUploadConfig,
 } from "./types";
-import { getEmbedding, batchEmbed, describePageTypeWithChatGPT, describePageTypeWithVLM, describeWithVLM } from "./apiEmbeddings";
+import {
+  getEmbedding,
+  getEmbeddingChatGPT,
+  batchEmbed,
+  describePageTypeWithChatGPT,
+  describePageTypeWithVLM,
+  describeWithVLM,
+} from "./apiEmbeddings";
 import type { LogEntry } from "./workflow";
 import {
   createWorkflowId,
@@ -276,7 +283,22 @@ async function handleMatch(req: MatchRequest): Promise<MatchResponse> {
     if (!tfidfUseful) {
       servicesCalled.add("vectordb.getAll");
       const all = await getAll();
-      allRecords = all.map((record) => ({ record, score: 0 }));
+      let candidates = all;
+      if (req.accept) {
+        const accepts = req.accept.split(",").map((s) => s.trim().toLowerCase());
+        const filtered = all.filter((r) => {
+          const ext = "." + r.name.split(".").pop()?.toLowerCase();
+          const mime = r.type.toLowerCase();
+          return accepts.some(
+            (a) =>
+              a === ext ||
+              a === mime ||
+              (a.endsWith("/*") && mime.startsWith(a.replace("/*", "/")))
+          );
+        });
+        if (filtered.length > 0) candidates = filtered;
+      }
+      allRecords = candidates.map((record) => ({ record, score: 0 }));
       logWorkflowStep(workflowId, "ranking.fallback.path_content", {
         reason: "tfidf_low_signal",
         maxTfidf: roundScore(maxTfidf),
@@ -322,6 +344,9 @@ async function handleMatch(req: MatchRequest): Promise<MatchResponse> {
     const ONE_DAY = 24 * 60 * 60 * 1000;
     const now = Date.now();
 
+    const resumeContext =
+      /resume|cv|简历|job application/i.test(req.context) ||
+      /resume|cv|简历|job application/i.test(req.pageUrl || "");
     const ranked = allRecords.map((r) => {
       const tfidfScore = r.score;
 
@@ -337,22 +362,24 @@ async function handleMatch(req: MatchRequest): Promise<MatchResponse> {
       const pathNameScore = computePathNameScore(r.record.path, req.context);
       const contentOverlap = computeContentOverlap(r.record.textPreview, req.context);
       const pathMemoryBoost = usedPathSet.has(r.record.path) ? 1 : 0;
+      const resumeBoost = resumeContext && /resume|cv|简历/i.test(r.record.path) ? 1 : 0;
       const hasHistory = historyBoost > 0;
 
       const weights = tfidfUseful
         ? (hasHistory
-          ? { tfidf: 0.42, history: 0.28, path: 0.14, content: 0.08, pathMemory: 0.08 }
-          : { tfidf: 0.56, history: 0.00, path: 0.22, content: 0.14, pathMemory: 0.08 })
+          ? { tfidf: 0.36, history: 0.24, path: 0.12, content: 0.07, pathMemory: 0.07, resume: 0.14 }
+          : { tfidf: 0.48, history: 0.00, path: 0.18, content: 0.12, pathMemory: 0.06, resume: 0.16 })
         : (hasHistory
-          ? { tfidf: 0.00, history: 0.36, path: 0.30, content: 0.20, pathMemory: 0.14 }
-          : { tfidf: 0.00, history: 0.00, path: 0.44, content: 0.42, pathMemory: 0.14 });
+          ? { tfidf: 0.00, history: 0.30, path: 0.25, content: 0.18, pathMemory: 0.10, resume: 0.17 }
+          : { tfidf: 0.00, history: 0.00, path: 0.34, content: 0.30, pathMemory: 0.12, resume: 0.24 });
 
       const finalScore =
         tfidfScore * weights.tfidf +
         historyBoost * weights.history +
         pathNameScore * weights.path +
         contentOverlap * weights.content +
-        pathMemoryBoost * weights.pathMemory;
+        pathMemoryBoost * weights.pathMemory +
+        resumeBoost * weights.resume;
 
       return {
         ...r,
@@ -364,6 +391,7 @@ async function handleMatch(req: MatchRequest): Promise<MatchResponse> {
           pathNameScore,
           contentOverlap,
           pathMemoryBoost,
+          resumeBoost,
           weights,
         },
       };
@@ -382,6 +410,7 @@ async function handleMatch(req: MatchRequest): Promise<MatchResponse> {
       pathNameScore: roundScore(r.debug.pathNameScore),
       contentOverlap: roundScore(r.debug.contentOverlap),
       pathMemoryBoost: r.debug.pathMemoryBoost,
+      resumeBoost: r.debug.resumeBoost,
       historyCount: r.historyCount,
       weights: r.debug.weights,
     })));
@@ -479,9 +508,16 @@ async function handleMatchEnhanced(req: MatchRequestEnhanced): Promise<MatchResp
 
   // Get query embedding
   try {
-    servicesCalled.add("gemini.getEmbedding");
-    logWorkflowStep(workflowId, "service.gemini.getEmbedding.start");
-    const queryVec = await getEmbedding(queryText, config.apiKey);
+    let queryVec: number[] = [];
+    if (req.mode === "vlm_gpt") {
+      servicesCalled.add("chatgpt.getEmbedding");
+      logWorkflowStep(workflowId, "service.chatgpt.getEmbedding.start");
+      queryVec = await getEmbeddingChatGPT(queryText, config.apiKey);
+    } else {
+      servicesCalled.add("gemini.getEmbedding");
+      logWorkflowStep(workflowId, "service.gemini.getEmbedding.start");
+      queryVec = await getEmbedding(queryText, config.apiKey);
+    }
 
     servicesCalled.add("vectordb.denseSearch");
     const results = await denseSearch(queryVec, 5, req.accept);

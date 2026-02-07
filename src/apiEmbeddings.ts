@@ -6,6 +6,7 @@
 const EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent";
 const VLM_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
 const OPENAI_VLM_URL = "https://api.openai.com/v1/responses";
+const OPENAI_EMBEDDING_URL = "https://api.openai.com/v1/embeddings";
 
 /**
  * Get a 768-dim text embedding from Gemini text-embedding-004.
@@ -26,6 +27,31 @@ export async function getEmbedding(text: string, apiKey: string): Promise<number
 
   const data = await resp.json();
   return data.embedding.values as number[];
+}
+
+/**
+ * Get a 1536-dim text embedding from OpenAI text-embedding-3-small.
+ */
+export async function getEmbeddingChatGPT(text: string, apiKey: string): Promise<number[]> {
+  const resp = await fetch(OPENAI_EMBEDDING_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "text-embedding-3-small",
+      input: text.slice(0, 8000),
+    }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`ChatGPT embedding error ${resp.status}: ${err}`);
+  }
+
+  const data = await resp.json();
+  return data.data?.[0]?.embedding || [];
 }
 
 /**
