@@ -385,6 +385,7 @@ async function doMatch(anchor: HTMLElement, target: UploadTarget) {
     type: "MATCH_REQUEST",
     context: target.context,
     accept: target.accept,
+    pageUrl: window.location.href,
   };
 
   const resp: MatchResponse = await chrome.runtime.sendMessage(msg);
@@ -447,6 +448,14 @@ function showPanel(
 
       info.appendChild(nameSpan);
       info.appendChild(pathSpan);
+
+      // Show history badge if file was previously uploaded to this site
+      if (r.historyCount && r.historyCount > 0) {
+        const badge = document.createElement("span");
+        badge.className = "xupload-history-badge";
+        badge.textContent = `Used ${r.historyCount}x here`;
+        info.appendChild(badge);
+      }
 
       const scoreSpan = document.createElement("span");
       scoreSpan.className = "xupload-score";
@@ -630,6 +639,23 @@ function showPreview(
       useBtn.textContent = "\u2713 Done";
       useBtn.classList.add("xupload-preview-done");
       setTimeout(() => panel.remove(), 600);
+
+      // Track upload history
+      try {
+        chrome.runtime.sendMessage({
+          type: "TRACK_UPLOAD",
+          entry: {
+            fileId: result.id,
+            fileName: result.name,
+            fileType: result.type,
+            websiteHost: new URL(window.location.href).hostname,
+            pageUrl: window.location.href,
+            pageTitle: document.title,
+            uploadContext: target.context.slice(0, 200),
+            timestamp: Date.now(),
+          },
+        });
+      } catch { /* non-critical */ }
     } else {
       useBtn.textContent = "Error";
       useBtn.disabled = false;
@@ -766,6 +792,29 @@ async function fillFile(target: UploadTarget, fileId: string, fileName: string, 
 
 // ---- Scan and inject ----
 
+/** Map from button to its target for repositioning */
+const buttonTargets = new Map<HTMLButtonElement, UploadTarget>();
+
+function positionButton(btn: HTMLButtonElement, anchor: HTMLElement) {
+  const rect = anchor.getBoundingClientRect();
+  // Skip if anchor is not visible / has no dimensions
+  if (rect.width === 0 && rect.height === 0) return;
+  btn.style.position = "fixed";
+  btn.style.top = `${rect.top + (rect.height - 28) / 2}px`;
+  btn.style.left = `${rect.right + 4}px`;
+}
+
+function repositionAllButtons() {
+  for (const [btn, target] of buttonTargets) {
+    if (!document.body.contains(target.anchor)) {
+      btn.remove();
+      buttonTargets.delete(btn);
+      continue;
+    }
+    positionButton(btn, target.anchor);
+  }
+}
+
 function scanAndInject() {
   const targets = findUploadTargets();
   for (const target of targets) {
@@ -773,7 +822,10 @@ function scanAndInject() {
     processed.add(target.anchor);
 
     const btn = createButton(target);
-    target.anchor.insertAdjacentElement("afterend", btn);
+    btn.style.zIndex = "2147483646";
+    document.body.appendChild(btn);
+    positionButton(btn, target.anchor);
+    buttonTargets.set(btn, target);
   }
 }
 
@@ -781,3 +833,7 @@ scanAndInject();
 
 const observer = new MutationObserver(() => scanAndInject());
 observer.observe(document.body, { childList: true, subtree: true });
+
+// Reposition buttons on scroll/resize
+window.addEventListener("scroll", repositionAllButtons, { passive: true });
+window.addEventListener("resize", repositionAllButtons, { passive: true });

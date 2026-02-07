@@ -4,15 +4,16 @@
   justify-content: center;
   width: 28px;
   height: 28px;
-  margin-left: 6px;
+  padding: 0;
   border: 1px solid #d0d0d0;
   border-radius: 6px;
   background: #fff;
   cursor: pointer;
   font-size: 14px;
-  vertical-align: middle;
   transition: all 0.15s ease;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  /* Fixed positioning set by JS; ensure no layout interference */
+  z-index: 2147483646;
 }
 
 .xupload-btn:hover {
@@ -114,6 +115,16 @@
   text-align: right;
 }
 
+.xupload-history-badge {
+  display: inline-block;
+  font-size: 10px;
+  color: #34a853;
+  background: #e8f5e9;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-top: 2px;
+}
+
 /* States */
 
 .xupload-loading {
@@ -135,4 +146,104 @@
   text-align: center;
   color: #999;
   font-size: 12px;
+}
+
+/* ---- Preview panel ---- */
+
+.xupload-preview {
+  max-width: 480px;
+  min-width: 340px;
+}
+
+.xupload-preview .xupload-header {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xupload-preview-content {
+  max-height: 400px;
+  overflow: auto;
+  border-bottom: 1px solid #eef2f9;
+}
+
+.xupload-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 380px;
+  margin: 0 auto;
+  object-fit: contain;
+  padding: 8px;
+}
+
+.xupload-preview-pdf {
+  width: 100%;
+  height: 380px;
+  border: none;
+}
+
+.xupload-preview-text {
+  margin: 0;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #333;
+  background: #fafafa;
+}
+
+.xupload-preview-info {
+  padding: 32px 16px;
+  text-align: center;
+  color: #666;
+  font-size: 13px;
+}
+
+.xupload-preview-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  justify-content: flex-end;
+}
+
+.xupload-preview-btn {
+  padding: 7px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.xupload-preview-back {
+  background: #f0f0f0;
+  color: #555;
+}
+
+.xupload-preview-back:hover {
+  background: #e5e5e5;
+}
+
+.xupload-preview-use {
+  background: #4285f4;
+  color: #fff;
+}
+
+.xupload-preview-use:hover {
+  background: #3367d6;
+}
+
+.xupload-preview-use:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.xupload-preview-done {
+  background: #34a853 !important;
 }

@@ -15,10 +15,16 @@ export interface VectorRecord {
   textPreview: string;     // first N chars of extracted text
 }
 
+import type { VocabSnapshot } from "./embeddings";
+import type { UploadHistoryEntry } from "./types";
+
 const DB_NAME = "xupload_vectors";
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const STORE_NAME = "files";
 const HANDLE_STORE = "dir_handles";
+const VOCAB_STORE = "vocabulary";
+const HISTORY_STORE = "upload_history";
+const CONFIG_STORE = "config";
 
 function openDB(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -31,6 +37,17 @@ function openDB(): Promise<IDBDatabase> {
       db.createObjectStore(STORE_NAME, { keyPath: "id" });
       if (!db.objectStoreNames.contains(HANDLE_STORE)) {
         db.createObjectStore(HANDLE_STORE);
+      }
+      if (!db.objectStoreNames.contains(VOCAB_STORE)) {
+        db.createObjectStore(VOCAB_STORE);
+      }
+      if (!db.objectStoreNames.contains(HISTORY_STORE)) {
+        const historyStore = db.createObjectStore(HISTORY_STORE, { keyPath: "id", autoIncrement: true });
+        historyStore.createIndex("websiteHost", "websiteHost", { unique: false });
+        historyStore.createIndex("timestamp", "timestamp", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(CONFIG_STORE)) {
+        db.createObjectStore(CONFIG_STORE);
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -219,4 +236,89 @@ export async function getFileData(id: string): Promise<{
     console.error("[xUpload] Failed to read file on-demand:", err);
     return null;
   }
+}
+
+// ---- Vocabulary persistence (IndexedDB) ----
+
+export async function saveVocab(vocab: VocabSnapshot): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VOCAB_STORE, "readwrite");
+    tx.objectStore(VOCAB_STORE).put(vocab, "main");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getVocab(): Promise<VocabSnapshot | null> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VOCAB_STORE, "readonly");
+    const req = tx.objectStore(VOCAB_STORE).get("main");
+    req.onsuccess = () => resolve(req.result ?? null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ---- Upload history ----
+
+export async function addUploadHistory(entry: Omit<UploadHistoryEntry, "id">): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HISTORY_STORE, "readwrite");
+    tx.objectStore(HISTORY_STORE).add(entry);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getHistoryByHost(websiteHost: string, limit: number = 50): Promise<UploadHistoryEntry[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HISTORY_STORE, "readonly");
+    const index = tx.objectStore(HISTORY_STORE).index("websiteHost");
+    const req = index.getAll(websiteHost, limit);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+// ---- Delete record by ID ----
+
+export async function deleteById(id: string): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    tx.objectStore(STORE_NAME).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ---- Config persistence ----
+
+export interface RescanConfig {
+  autoRescanEnabled: boolean;
+  rescanIntervalMin: number;
+  lastScanTimestamp: number;
+}
+
+export async function getRescanConfig(): Promise<RescanConfig> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CONFIG_STORE, "readonly");
+    const req = tx.objectStore(CONFIG_STORE).get("rescan");
+    req.onsuccess = () => resolve(req.result ?? { autoRescanEnabled: true, rescanIntervalMin: 30, lastScanTimestamp: 0 });
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function saveRescanConfig(config: RescanConfig): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CONFIG_STORE, "readwrite");
+    tx.objectStore(CONFIG_STORE).put(config, "rescan");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
 }

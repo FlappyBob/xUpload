@@ -3,7 +3,7 @@
   "name": "xUpload",
   "version": "0.1.0",
   "description": "Smart file upload recommendations based on page context",
-  "permissions": ["storage"],
+  "permissions": ["storage", "alarms"],
   "background": {
     "service_worker": "src/background.ts",
     "type": "module"
