@@ -40,7 +40,7 @@
     - Agentic recommendation through website with file descriptions
   
 # Recognize webpage
-- Current stage: a simply screen shot is enough for analyzing the website
+- Current stage: a simple screen shot is enough for analyzing the website
 - Later: later on we can do webpage element wise analysis or any other with open sourced library
   
 # Other small improvement
