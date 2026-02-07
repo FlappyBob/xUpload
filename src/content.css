@@ -1,0 +1,238 @@
+.xupload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: 6px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+  font-size: 14px;
+  vertical-align: middle;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.xupload-btn:hover {
+  background: #f0f7ff;
+  border-color: #4a90d9;
+  box-shadow: 0 2px 6px rgba(74, 144, 217, 0.2);
+  transform: scale(1.05);
+}
+
+/* ---- Panel ---- */
+
+.xupload-panel {
+  z-index: 2147483647;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  min-width: 300px;
+  max-width: 420px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  color: #333;
+  overflow: hidden;
+}
+
+.xupload-header {
+  padding: 10px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #4a90d9;
+  background: #f8faff;
+  border-bottom: 1px solid #eef2f9;
+}
+
+.xupload-panel ul {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.xupload-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: background 0.12s;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.xupload-item:last-child {
+  border-bottom: none;
+}
+
+.xupload-item:hover {
+  background: #f0f5ff;
+}
+
+.xupload-item:active {
+  background: #e0ecff;
+}
+
+.xupload-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  width: 28px;
+  text-align: center;
+}
+
+.xupload-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.xupload-name {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xupload-path {
+  color: #999;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xupload-score {
+  color: #4a90d9;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+  min-width: 36px;
+  text-align: right;
+}
+
+/* States */
+
+.xupload-loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.xupload-done {
+  background: #f0faf0 !important;
+}
+
+.xupload-done .xupload-score {
+  color: #34a853;
+  font-size: 16px;
+}
+
+.xupload-empty {
+  padding: 20px 16px;
+  text-align: center;
+  color: #999;
+  font-size: 12px;
+}
+
+/* ---- Preview panel ---- */
+
+.xupload-preview {
+  max-width: 480px;
+  min-width: 340px;
+}
+
+.xupload-preview .xupload-header {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xupload-preview-content {
+  max-height: 400px;
+  overflow: auto;
+  border-bottom: 1px solid #eef2f9;
+}
+
+.xupload-preview-img {
+  display: block;
+  max-width: 100%;
+  max-height: 380px;
+  margin: 0 auto;
+  object-fit: contain;
+  padding: 8px;
+}
+
+.xupload-preview-pdf {
+  width: 100%;
+  height: 380px;
+  border: none;
+}
+
+.xupload-preview-text {
+  margin: 0;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: "SF Mono", "Cascadia Code", "Consolas", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #333;
+  background: #fafafa;
+}
+
+.xupload-preview-info {
+  padding: 32px 16px;
+  text-align: center;
+  color: #666;
+  font-size: 13px;
+}
+
+.xupload-preview-actions {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  justify-content: flex-end;
+}
+
+.xupload-preview-btn {
+  padding: 7px 16px;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.xupload-preview-back {
+  background: #f0f0f0;
+  color: #555;
+}
+
+.xupload-preview-back:hover {
+  background: #e5e5e5;
+}
+
+.xupload-preview-use {
+  background: #4285f4;
+  color: #fff;
+}
+
+.xupload-preview-use:hover {
+  background: #3367d6;
+}
+
+.xupload-preview-use:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.xupload-preview-done {
+  background: #34a853 !important;
+}

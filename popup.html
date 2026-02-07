@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 320px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 13px;
+      color: #333;
+      padding: 16px;
+    }
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .status {
+      color: #888;
+      font-size: 12px;
+      margin-bottom: 12px;
+    }
+    .status strong { color: #4a90d9; }
+    button {
+      width: 100%;
+      padding: 10px;
+      border: 1px solid #d0d0d0;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.15s;
+    }
+    button:hover { background: #f0f7ff; border-color: #4a90d9; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .progress {
+      font-size: 11px;
+      color: #888;
+      margin-top: 8px;
+      min-height: 16px;
+    }
+    .file-list {
+      margin-top: 12px;
+      max-height: 200px;
+      overflow-y: auto;
+      font-size: 11px;
+      color: #666;
+    }
+    .file-list div {
+      padding: 3px 0;
+      border-bottom: 1px solid #f0f0f0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <h1>⚡ xUpload</h1>
+  <div class="status">Indexed files: <strong id="count">0</strong></div>
+  <button id="scanBtn">Select folder to scan</button>
+  <div class="progress" id="progress"></div>
+  <div class="file-list" id="fileList"></div>
+  <script type="module" src="src/popup.ts"></script>
+</body>
+</html>

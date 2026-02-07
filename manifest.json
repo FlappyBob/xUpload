@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "xUpload",
+  "version": "0.1.0",
+  "description": "Smart file upload recommendations based on page context",
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "src/background.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.ts"],
+      "css": ["src/content.css"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "xUpload"
+  },
+  "icons": {}
+}
