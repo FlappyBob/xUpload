@@ -418,6 +418,14 @@ function populateResults(
         logWorkflowStep(workflowId, "recommend.file.read_failed", {
           fileId: r.id,
         });
+
+        // Show inline error message
+        const errorDiv = document.createElement("div");
+        errorDiv.className = "xupload-permission-error";
+        errorDiv.textContent = "⚠️ Permission expired. Please click the ⚡ xUpload icon and click 'Rescan folder' to re-authorize.";
+        errorDiv.style.cssText = "padding: 8px; margin: 8px 0; background: #fef7e0; border-radius: 4px; font-size: 12px; color: #856404;";
+
+        panel.insertBefore(errorDiv, footer);
         return;
       }
 

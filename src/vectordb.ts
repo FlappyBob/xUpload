@@ -201,13 +201,10 @@ export async function getFileData(id: string): Promise<{
     const perm = await (dirHandle as any).queryPermission({ mode: "read" });
     console.log("[xUpload] Directory handle permission:", perm);
     if (perm !== "granted") {
-      // Try requesting permission (only works with user gesture)
-      const requested = await (dirHandle as any).requestPermission({ mode: "read" });
-      console.log("[xUpload] Permission after request:", requested);
-      if (requested !== "granted") {
-        console.error("[xUpload] Permission denied for directory handle");
-        return null;
-      }
+      // Don't try to request permission here - it will fail with 405
+      // because we're in background context without user gesture
+      console.warn("[xUpload] Directory permission not granted. User must re-authorize from popup.");
+      return null;
     }
 
     // Navigate to the file through the directory tree

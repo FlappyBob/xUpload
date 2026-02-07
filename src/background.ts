@@ -584,7 +584,9 @@ async function handleGetFile(id: string) {
 
   const data = await getFileData(id);
   if (!data) {
-    return { error: "Cannot read file. Please re-scan the folder from the xUpload popup." };
+    return {
+      error: "Permission expired. Click the xUpload extension icon and use 'Rescan folder' to re-authorize file access."
+    };
   }
 
   console.log("[xUpload] Sending:", data.name);
