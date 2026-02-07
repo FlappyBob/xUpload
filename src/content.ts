@@ -4,9 +4,12 @@ import type {
   MatchResponse,
   MatchResultItem,
   XUploadConfig,
+  PageClassifyRequest,
+  PageClassifyResponse,
 } from "./types";
 import {
   createWorkflowId,
+  getLogBuffer,
   logWorkflowError,
   logWorkflowStep,
 } from "./workflow";
@@ -519,6 +522,64 @@ async function getConfig(): Promise<XUploadConfig> {
   });
 }
 
+let pageClassified = false;
+let pageClassifyLabel: string | null = null;
+let classifyInFlight = false;
+
+async function classifyCurrentPageIfVlm(trigger: "init" | "config" | "visibility" = "init"): Promise<void> {
+  if (pageClassified || classifyInFlight) return;
+  classifyInFlight = true;
+
+  const workflowId = createWorkflowId("classify-page-content");
+  try {
+    const config = await getConfig();
+    logWorkflowStep(workflowId, "classify.auto.config.loaded", {
+      trigger,
+      mode: config.mode,
+      hasApiKey: !!config.apiKey,
+    });
+    if ((config.mode !== "vlm" && config.mode !== "vlm_gpt") || !config.apiKey) {
+      logWorkflowStep(workflowId, "classify.auto.skipped", {
+        reason: config.mode !== "vlm" ? "mode_not_vlm" : "missing_api_key",
+      });
+      classifyInFlight = false;
+      return;
+    }
+    if (document.visibilityState !== "visible") {
+      logWorkflowStep(workflowId, "classify.auto.skipped", { reason: "tab_not_visible" });
+      classifyInFlight = false;
+      return;
+    }
+
+    const rawText = document.body?.innerText || "";
+    const textPreview = rawText.replace(/\s+/g, " ").slice(0, 2000);
+    const contextParts = [document.title, window.location.href, textPreview].filter(Boolean);
+    const context = contextParts.join("\n");
+
+    logWorkflowStep(workflowId, "classify.page.request", { contextLength: context.length });
+    const req: PageClassifyRequest = {
+      type: "PAGE_CLASSIFY_REQUEST",
+      context,
+      pageUrl: window.location.href,
+      title: document.title,
+      workflowId,
+      mode: config.mode,
+    };
+    const resp: PageClassifyResponse = await chrome.runtime.sendMessage(req);
+    if (resp.ok && resp.label) {
+      pageClassifyLabel = resp.label;
+      logWorkflowStep(workflowId, "classify.page.done", { labelPreview: resp.label.slice(0, 160) });
+      pageClassified = true;
+    } else {
+      logWorkflowError(workflowId, "classify.page.failed", resp.error || "unknown_error");
+    }
+  } catch (err) {
+    logWorkflowError(workflowId, "classify.page.exception", err);
+  } finally {
+    classifyInFlight = false;
+  }
+}
+
 async function fetchRecommendations(
   target: UploadTarget,
   workflowId: string,
@@ -528,12 +589,20 @@ async function fetchRecommendations(
     mode: config.mode,
     hasApiKey: !!config.apiKey,
   });
+  const requestContext = pageClassifyLabel
+    ? `${target.context}\n${pageClassifyLabel}`
+    : target.context;
+  if (pageClassifyLabel) {
+    logWorkflowStep(workflowId, "recommend.context.classification_attached", {
+      labelPreview: pageClassifyLabel.slice(0, 160),
+    });
+  }
 
   // Enhanced matching (fast / vlm)
   if (config.apiKey && config.mode !== "tfidf") {
     let screenshotBase64: string | undefined;
 
-    if (config.mode === "vlm") {
+    if (config.mode === "vlm" || config.mode === "vlm_gpt") {
       try {
         const rect = target.zone.getBoundingClientRect();
         const captureResp = await chrome.runtime.sendMessage({
@@ -558,7 +627,7 @@ async function fetchRecommendations(
 
     const msg: MatchRequestEnhanced = {
       type: "MATCH_REQUEST_ENHANCED",
-      context: target.context,
+      context: requestContext,
       accept: target.accept,
       pageUrl: window.location.href,
       workflowId,
@@ -581,7 +650,7 @@ async function fetchRecommendations(
   // TF-IDF fallback
   const msg: MatchRequest = {
     type: "MATCH_REQUEST",
-    context: target.context,
+    context: requestContext,
     accept: target.accept,
     pageUrl: window.location.href,
     workflowId,
@@ -1149,9 +1218,42 @@ function scanAndMark() {
 
 // Run once immediately
 scanAndMark();
+classifyCurrentPageIfVlm();
 
 // Re-scan when DOM changes
 new MutationObserver(() => scanAndMark()).observe(document.body, {
   childList: true,
   subtree: true,
+});
+
+// Re-classify when config changes to VLM mode / API key is set
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes.xupload_config) return;
+  classifyCurrentPageIfVlm("config");
+});
+
+// Retry when tab becomes visible
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    classifyCurrentPageIfVlm("visibility");
+  }
+});
+
+// Respond to debug log requests from popup
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "GET_CONTENT_LOGS") {
+    sendResponse({ source: "content", url: window.location.href, logs: getLogBuffer() });
+    return true;
+  }
+
+  if (msg.type === "GET_PAGE_CONTEXT") {
+    const rawText = document.body?.innerText || "";
+    const textPreview = rawText.replace(/\s+/g, " ").slice(0, 2000);
+    sendResponse({
+      title: document.title,
+      url: window.location.href,
+      textPreview,
+    });
+    return true;
+  }
 });

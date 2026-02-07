@@ -37,7 +37,7 @@ export interface UploadHistoryEntry {
 
 // ---- Config ----
 
-export type XUploadMode = "tfidf" | "fast" | "vlm";
+export type XUploadMode = "tfidf" | "fast" | "vlm" | "vlm_gpt";
 
 export interface XUploadConfig {
   apiKey: string;
@@ -55,4 +55,25 @@ export interface MatchRequestEnhanced {
   mode: XUploadMode;
   boundingRect?: { top: number; left: number; width: number; height: number };
   screenshotBase64?: string;  // populated by content script for VLM mode
+}
+
+// ---- Page classification (VLM) ----
+
+export interface PageClassifyRequest {
+  type: "PAGE_CLASSIFY_REQUEST";
+  context: string;
+  pageUrl?: string;
+  title?: string;
+  windowId?: number;
+  workflowId?: string;
+  screenshotBase64?: string;
+  mode?: XUploadMode;
+}
+
+export interface PageClassifyResponse {
+  type: "PAGE_CLASSIFY_RESPONSE";
+  ok: boolean;
+  workflowId?: string;
+  label?: string;
+  error?: string;
 }

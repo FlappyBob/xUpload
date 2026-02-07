@@ -5,6 +5,7 @@
 
 const EMBEDDING_URL = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent";
 const VLM_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent";
+const OPENAI_VLM_URL = "https://api.openai.com/v1/responses";
 
 /**
  * Get a 768-dim text embedding from Gemini text-embedding-004.
@@ -96,5 +97,105 @@ export async function describeWithVLM(
 
   const data = await resp.json();
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return text;
+}
+
+/**
+ * Use Gemini 2.0 Flash with vision to classify the page type from a screenshot.
+ * Returns a short label plus a one-line rationale.
+ */
+export async function describePageTypeWithVLM(
+  imageBase64: string,
+  contextText: string,
+  apiKey: string,
+): Promise<string> {
+  const resp = await fetch(`${VLM_URL}?key=${apiKey}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          {
+            inlineData: {
+              mimeType: "image/png",
+              data: imageBase64,
+            },
+          },
+          {
+            text: [
+              "You are classifying what type of website this is based on a screenshot and page context.",
+              "Return a short label and a one-line rationale.",
+              "Choose the closest label from: job application, visa/immigration, university application, banking/finance, healthcare, government services, e-commerce checkout, file upload portal, AI chat, general form, other.",
+              `Context: "${contextText.slice(0, 1200)}"`,
+            ].join("\n"),
+          },
+        ],
+      }],
+      generationConfig: {
+        maxOutputTokens: 120,
+        temperature: 0.2,
+      },
+    }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`Gemini VLM error ${resp.status}: ${err}`);
+  }
+
+  const data = await resp.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  return text;
+}
+
+/**
+ * Use OpenAI vision (ChatGPT) to classify the page type from a screenshot.
+ * Returns a short label plus a one-line rationale.
+ */
+export async function describePageTypeWithChatGPT(
+  imageBase64: string,
+  contextText: string,
+  apiKey: string,
+): Promise<string> {
+  const resp = await fetch(OPENAI_VLM_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      input: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "input_text",
+              text: [
+                "You are classifying what type of website this is based on a screenshot and page context.",
+                "Return a short label and a one-line rationale.",
+                "Choose the closest label from: job application, visa/immigration, university application, banking/finance, healthcare, government services, e-commerce checkout, file upload portal, AI chat, general form, other.",
+                `Context: "${contextText.slice(0, 1200)}"`,
+              ].join("\n"),
+            },
+            {
+              type: "input_image",
+              image_url: `data:image/png;base64,${imageBase64}`,
+            },
+          ],
+        },
+      ],
+      max_output_tokens: 120,
+      temperature: 0.2,
+    }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`ChatGPT VLM error ${resp.status}: ${err}`);
+  }
+
+  const data = await resp.json();
+  const text = data.output?.[0]?.content?.[0]?.text || "";
   return text;
 }

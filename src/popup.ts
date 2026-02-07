@@ -18,7 +18,7 @@ import {
   saveRescanConfig,
   type VectorRecord,
 } from "./vectordb";
-import { createWorkflowId, logWorkflowError, logWorkflowStep } from "./workflow";
+import { createWorkflowId, getLogBuffer, logWorkflowError, logWorkflowStep } from "./workflow";
 
 const countEl = document.getElementById("count")!;
 const scanBtn = document.getElementById("scanBtn") as HTMLButtonElement;
@@ -30,6 +30,8 @@ const autoRescanCheckbox = document.getElementById("autoRescan") as HTMLInputEle
 const rescanIntervalSelect = document.getElementById("rescanInterval") as HTMLSelectElement | null;
 const apiKeyInput = document.getElementById("apiKey") as HTMLInputElement | null;
 const matchModeSelect = document.getElementById("matchMode") as HTMLSelectElement | null;
+const exportLogsBtn = document.getElementById("exportLogsBtn") as HTMLButtonElement | null;
+const debugFailCheckbox = document.getElementById("debugFail") as HTMLInputElement | null;
 
 // Load initial state
 getCount().then((n) => (countEl.textContent = String(n)));
@@ -66,7 +68,7 @@ if (rescanBtn) {
       logWorkflowStep(workflowId, "service.vectordb.getDirectoryHandle.start");
       const dirHandle = await getDirectoryHandle();
       if (!dirHandle) {
-        logWorkflowStep(workflowId, "rescan.popup.no_directory_handle");
+        logWorkflowError(workflowId, "rescan.popup.no_directory_handle", null);
         progressEl.textContent = "No folder selected yet. Use 'Select folder' first.";
         return;
       }
@@ -77,6 +79,7 @@ if (rescanBtn) {
         const requested = await (dirHandle as any).requestPermission({ mode: "read" });
         logWorkflowStep(workflowId, "service.filesystem.requestPermission.done", { permission: requested });
         if (requested !== "granted") {
+          logWorkflowError(workflowId, "rescan.popup.permission_denied", { permission: requested });
           progressEl.textContent = "Permission denied. Please select folder again.";
           return;
         }
@@ -138,11 +141,16 @@ async function buildIndex(
   progressEl.textContent = "Scanning files...";
 
   try {
+    logWorkflowStep(workflowId, "scan.phase.collectFiles.start");
     const entries = await collectFiles(dirHandle, "");
     progressEl.textContent = `Found ${entries.length} files. Checking for changes...`;
     logWorkflowStep(workflowId, "service.filesystem.collectFiles.done", {
       discoveredFiles: entries.length,
     });
+    if (debugFailCheckbox?.checked) {
+      logWorkflowError(workflowId, "scan.debug.fail.injected", { at: "after_collect" });
+      throw new Error("Injected debug failure");
+    }
 
     await saveDirectoryHandle(dirHandle);
     logWorkflowStep(workflowId, "service.vectordb.saveDirectoryHandle.done");
@@ -155,6 +163,7 @@ async function buildIndex(
       servicesCalled.add("vectordb.deleteById");
     }
 
+    logWorkflowStep(workflowId, "scan.phase.read.start");
     const docs: DocEntry[] = [];
     const unchangedDocs: DocEntry[] = [];
     let skipped = 0;
@@ -196,8 +205,12 @@ async function buildIndex(
           lastModified: file.lastModified,
           text,
         });
-      } catch {
+      } catch (err) {
         unreadable++;
+        logWorkflowError(workflowId, "scan.phase.read.file_failed", {
+          path,
+          error: err instanceof Error ? { message: err.message, stack: err.stack } : err,
+        });
       }
 
       if (i % 10 === 0) {
@@ -234,6 +247,7 @@ async function buildIndex(
     progressEl.textContent = `Building vectors... (${docs.length} new/modified, ${skipped} unchanged, ${deleted} deleted)`;
 
     const allDocs = [...docs, ...unchangedDocs];
+    logWorkflowStep(workflowId, "scan.phase.vocab.start", { totalDocs: allDocs.length });
     const allTokens = allDocs.map((d) => tokenize(d.text));
     buildVocabulary(allTokens);
     logWorkflowStep(workflowId, "scan.phase.vocab.done", {
@@ -246,6 +260,7 @@ async function buildIndex(
       logWorkflowStep(workflowId, "service.vectordb.clearAll.done");
     }
 
+    logWorkflowStep(workflowId, "scan.phase.index.start", { newOrModified: docs.length });
     for (let i = 0; i < docs.length; i++) {
       const d = docs[i];
       const vec = vectorize(allTokens[i]);
@@ -267,6 +282,7 @@ async function buildIndex(
     }
 
     if (incremental && unchangedDocs.length > 0) {
+      logWorkflowStep(workflowId, "scan.phase.index.revectorize.start", { unchanged: unchangedDocs.length });
       progressEl.textContent = "Updating vectors for unchanged files...";
       for (let i = 0; i < unchangedDocs.length; i++) {
         const d = unchangedDocs[i];
@@ -282,6 +298,7 @@ async function buildIndex(
       revectorized: unchangedDocs.length,
     });
 
+    logWorkflowStep(workflowId, "scan.phase.persist.start");
     const vocab = exportVocab();
     await saveVocab(vocab);
     chrome.storage.local.set({ vocab }, () => {
@@ -429,3 +446,60 @@ function saveApiConfig() {
 
 if (apiKeyInput) apiKeyInput.addEventListener("change", saveApiConfig);
 if (matchModeSelect) matchModeSelect.addEventListener("change", saveApiConfig);
+
+// ---- Export debug logs ----
+if (exportLogsBtn) {
+  exportLogsBtn.addEventListener("click", async () => {
+    exportLogsBtn.disabled = true;
+    exportLogsBtn.textContent = "Collecting...";
+
+    try {
+      const bgResp = await chrome.runtime.sendMessage({ type: "GET_DEBUG_LOGS" });
+
+      let contentResp: any = null;
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab?.id) {
+          contentResp = await chrome.tabs.sendMessage(tab.id, { type: "GET_CONTENT_LOGS" });
+        }
+      } catch {
+        // Content script may not be injected on the active tab.
+      }
+
+      const popupLogs = getLogBuffer();
+      const report = {
+        exportedAt: new Date().toISOString(),
+        userAgent: navigator.userAgent,
+        background: {
+          logs: bgResp?.logs || [],
+          meta: bgResp?.meta || {},
+        },
+        content: contentResp
+          ? { url: contentResp.url, logs: contentResp.logs || [] }
+          : null,
+        popup: {
+          logs: popupLogs,
+        },
+      };
+
+      const blob = new Blob([JSON.stringify(report, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `xupload-debug-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      exportLogsBtn.textContent = "Downloaded!";
+      setTimeout(() => {
+        exportLogsBtn.textContent = "Export Debug Logs";
+        exportLogsBtn.disabled = false;
+      }, 1500);
+    } catch (err) {
+      console.error("[xUpload] Export logs failed:", err);
+      exportLogsBtn.textContent = "Export failed";
+      exportLogsBtn.disabled = false;
+    }
+  });
+}
+

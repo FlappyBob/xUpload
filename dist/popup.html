@@ -125,7 +125,7 @@
   <div class="config-section">
     <div class="config-row" style="margin-bottom: 6px;">
       <label style="flex:1;">
-        Gemini API Key
+        Agent API Key
         <input type="password" id="apiKey" placeholder="Enter key..." style="width:100%;margin-top:4px;padding:6px 8px;border:1px solid #d0d0d0;border-radius:4px;font-size:12px;">
       </label>
     </div>
@@ -135,7 +135,21 @@
         <option value="tfidf">TF-IDF (no API)</option>
         <option value="fast">Fast (Gemini Embedding)</option>
         <option value="vlm">VLM (Screenshot + Gemini)</option>
+        <option value="vlm_gpt">VLM (Screenshot + ChatGPT)</option>
       </select>
+    </div>
+  </div>
+  <div class="config-section">
+    <div class="config-row">
+      <button id="exportLogsBtn">Export Debug Logs</button>
+    </div>
+  </div>
+  <div class="config-section">
+    <div class="config-row">
+      <label>
+        <input type="checkbox" id="debugFail">
+        Debug: simulate error during scan
+      </label>
     </div>
   </div>
   <div class="progress" id="progress"></div>

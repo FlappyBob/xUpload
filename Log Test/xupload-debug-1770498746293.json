@@ -1,0 +1,120 @@
+{
+  "exportedAt": "2026-02-07T21:12:26.292Z",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36",
+  "background": {
+    "logs": [],
+    "meta": {
+      "indexedFiles": 5,
+      "vocabSize": 338,
+      "timestamp": 1770498746290
+    }
+  },
+  "content": {
+    "url": "https://lifeattiktok.com/resume/7600254635782326581/apply",
+    "logs": [
+      {
+        "ts": 1770498699323,
+        "level": "info",
+        "workflowId": "classify-page-content-mlct7nln-t2otwd",
+        "step": "classify.auto.config.loaded",
+        "data": {
+          "trigger": "init",
+          "mode": "tfidf",
+          "hasApiKey": false
+        }
+      },
+      {
+        "ts": 1770498699323,
+        "level": "info",
+        "workflowId": "classify-page-content-mlct7nln-t2otwd",
+        "step": "classify.auto.skipped",
+        "data": {
+          "reason": "mode_not_vlm"
+        }
+      },
+      {
+        "ts": 1770498707020,
+        "level": "info",
+        "workflowId": "classify-page-content-mlct7tjf-ss7jdx",
+        "step": "classify.auto.config.loaded",
+        "data": {
+          "trigger": "config",
+          "mode": "tfidf",
+          "hasApiKey": true
+        }
+      },
+      {
+        "ts": 1770498707020,
+        "level": "info",
+        "workflowId": "classify-page-content-mlct7tjf-ss7jdx",
+        "step": "classify.auto.skipped",
+        "data": {
+          "reason": "mode_not_vlm"
+        }
+      },
+      {
+        "ts": 1770498708363,
+        "level": "info",
+        "workflowId": "classify-page-content-mlct7ukp-2fbrv7",
+        "step": "classify.auto.config.loaded",
+        "data": {
+          "trigger": "config",
+          "mode": "vlm_gpt",
+          "hasApiKey": true
+        }
+      },
+      {
+        "ts": 1770498708364,
+        "level": "info",
+        "workflowId": "classify-page-content-mlct7ukp-2fbrv7",
+        "step": "classify.page.request",
+        "data": {
+          "contextLength": 2064
+        }
+      },
+      {
+        "ts": 1770498710088,
+        "level": "info",
+        "workflowId": "classify-page-content-mlct7ukp-2fbrv7",
+        "step": "classify.page.done",
+        "data": {
+          "labelPreview": "**Label:** Job Application  \n**Rationale:** The page is designed for submitting a resume and personal information for a job position at TikTok."
+        }
+      },
+      {
+        "ts": 1770498711973,
+        "level": "info",
+        "workflowId": "recommend-mlct7xd1-hmp3b8",
+        "step": "recommend.start",
+        "data": {
+          "contextPreview": "Drag your resume hereSelect fileSupported file formats: PDF, DOC, DOCX, PPT, PPTX, PNG, JPG, JPEG",
+          "accept": ".pdf,.doc,.docx,.ppt,.pptx,.png,.jpg,.jpeg",
+          "url": "https://lifeattiktok.com/resume/7600254635782326581/apply"
+        }
+      },
+      {
+        "ts": 1770498711976,
+        "level": "info",
+        "workflowId": "recommend-mlct7xd1-hmp3b8",
+        "step": "recommend.config.loaded",
+        "data": {
+          "mode": "vlm_gpt",
+          "hasApiKey": true
+        }
+      },
+      {
+        "ts": 1770498714929,
+        "level": "info",
+        "workflowId": "recommend-mlct7xd1-hmp3b8",
+        "step": "service.background.MATCH_REQUEST_ENHANCED.done",
+        "data": {
+          "responseWorkflowId": "recommend-mlct7xd1-hmp3b8",
+          "resultCount": 3
+        }
+      }
+    ]
+  },
+  "popup": {
+    "logs": []
+  }
+}

@@ -26,9 +26,26 @@ import {
   saveUsedPath,
   getUsedPaths,
 } from "./vectordb";
-import type { MatchRequest, MatchRequestEnhanced, MatchResponse, UploadHistoryEntry, XUploadConfig } from "./types";
-import { getEmbedding, batchEmbed, describeWithVLM } from "./apiEmbeddings";
-import { createWorkflowId, logWorkflowError, logWorkflowStep, roundScore } from "./workflow";
+import type {
+  MatchRequest,
+  MatchRequestEnhanced,
+  MatchResponse,
+  PageClassifyRequest,
+  PageClassifyResponse,
+  UploadHistoryEntry,
+  XUploadConfig,
+} from "./types";
+import { getEmbedding, batchEmbed, describePageTypeWithChatGPT, describePageTypeWithVLM, describeWithVLM } from "./apiEmbeddings";
+import type { LogEntry } from "./workflow";
+import {
+  createWorkflowId,
+  getLogBuffer,
+  loadPersistedLogs,
+  logWorkflowError,
+  logWorkflowStep,
+  roundScore,
+  setLogPersister,
+} from "./workflow";
 
 async function ensureVocab(): Promise<void> {
   if (getVocabSize() > 0) return;
@@ -58,6 +75,21 @@ async function ensureVocab(): Promise<void> {
 }
 
 ensureVocab();
+
+// Persist debug logs to chrome.storage.local so they survive SW restarts
+const STORAGE_KEY_LOGS = "xupload_debug_logs";
+(function initLogPersistence() {
+  chrome.storage.local.get(STORAGE_KEY_LOGS, (data) => {
+    const saved = data[STORAGE_KEY_LOGS];
+    if (Array.isArray(saved) && saved.length > 0) {
+      loadPersistedLogs(saved as LogEntry[]);
+    }
+  });
+
+  setLogPersister((logs: LogEntry[]) => {
+    chrome.storage.local.set({ [STORAGE_KEY_LOGS]: logs });
+  });
+})();
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "MATCH_REQUEST") {
@@ -138,6 +170,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg.type === "RESCAN_CONFIG_UPDATED") {
     setupRescanAlarm().then(() => sendResponse({ ok: true }));
+    return true;
+  }
+
+  if (msg.type === "PAGE_CLASSIFY_REQUEST") {
+    handleClassifyPage(msg as PageClassifyRequest).then(sendResponse);
+    return true;
+  }
+
+  if (msg.type === "GET_DEBUG_LOGS") {
+    (async () => {
+      const count = await getCount();
+      sendResponse({
+        source: "background",
+        logs: getLogBuffer(),
+        meta: {
+          indexedFiles: count,
+          vocabSize: getVocabSize(),
+          timestamp: Date.now(),
+        },
+      });
+    })();
     return true;
   }
 });
@@ -396,17 +449,31 @@ async function handleMatchEnhanced(req: MatchRequestEnhanced): Promise<MatchResp
   let queryText = req.context;
 
   // VLM mode: use screenshot to generate richer description
-  if (req.mode === "vlm" && req.screenshotBase64) {
+  if ((req.mode === "vlm" || req.mode === "vlm_gpt") && req.screenshotBase64) {
     try {
-      servicesCalled.add("gemini.describeWithVLM");
-      logWorkflowStep(workflowId, "service.gemini.describeWithVLM.start");
-      const description = await describeWithVLM(req.screenshotBase64, req.context, config.apiKey);
-      logWorkflowStep(workflowId, "service.gemini.describeWithVLM.done", {
-        descriptionPreview: description.slice(0, 160),
-      });
-      queryText = `${description} ${req.context}`;
+      if (req.mode === "vlm_gpt") {
+        servicesCalled.add("chatgpt.describeWithVLM");
+        logWorkflowStep(workflowId, "service.chatgpt.describeWithVLM.start");
+        const description = await describePageTypeWithChatGPT(req.screenshotBase64, req.context, config.apiKey);
+        logWorkflowStep(workflowId, "service.chatgpt.describeWithVLM.done", {
+          descriptionPreview: description.slice(0, 160),
+        });
+        queryText = `${description} ${req.context}`;
+      } else {
+        servicesCalled.add("gemini.describeWithVLM");
+        logWorkflowStep(workflowId, "service.gemini.describeWithVLM.start");
+        const description = await describeWithVLM(req.screenshotBase64, req.context, config.apiKey);
+        logWorkflowStep(workflowId, "service.gemini.describeWithVLM.done", {
+          descriptionPreview: description.slice(0, 160),
+        });
+        queryText = `${description} ${req.context}`;
+      }
     } catch (err) {
-      logWorkflowError(workflowId, "service.gemini.describeWithVLM.failed", err);
+      logWorkflowError(
+        workflowId,
+        req.mode === "vlm_gpt" ? "service.chatgpt.describeWithVLM.failed" : "service.gemini.describeWithVLM.failed",
+        err,
+      );
     }
   }
 
@@ -434,36 +501,124 @@ async function handleMatchEnhanced(req: MatchRequestEnhanced): Promise<MatchResp
       });
     }
 
-    // Get upload history for scoring
+    // Get upload history + used paths for hybrid re-ranking
     let history: UploadHistoryEntry[] = [];
+    let usedPaths: string[] = [];
+    let pageHost = "";
     if (req.pageUrl) {
       try {
-        const host = new URL(req.pageUrl).hostname;
-        servicesCalled.add("vectordb.getHistoryByHost");
-        history = await getHistoryByHost(host);
+        pageHost = new URL(req.pageUrl).hostname;
       } catch { /* ignore */ }
     }
-    const historyMap = new Map<string, number>();
-    for (const h of history) {
-      historyMap.set(h.fileId, (historyMap.get(h.fileId) || 0) + 1);
+    if (pageHost) {
+      try {
+        servicesCalled.add("vectordb.getHistoryByHost");
+        history = await getHistoryByHost(pageHost);
+      } catch { /* ignore */ }
+      try {
+        servicesCalled.add("vectordb.getUsedPaths");
+        usedPaths = await getUsedPaths(pageHost);
+      } catch { /* ignore */ }
     }
+
+    const historyMap = new Map<string, { count: number; lastTs: number }>();
+    for (const h of history) {
+      const existing = historyMap.get(h.fileId);
+      if (!existing) {
+        historyMap.set(h.fileId, { count: 1, lastTs: h.timestamp });
+      } else {
+        historyMap.set(h.fileId, {
+          count: existing.count + 1,
+          lastTs: Math.max(existing.lastTs, h.timestamp),
+        });
+      }
+    }
+    const usedPathSet = new Set(usedPaths);
+
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const resumeContext =
+      /resume|cv|简历|job application/i.test(req.context) ||
+      /resume|cv|简历|job application/i.test(req.pageUrl || "");
+    const ranked = results.map((r) => {
+      const denseScore = r.score;
+      let historyBoost = 0;
+      let historyCount = 0;
+      const hist = historyMap.get(r.record.id);
+      if (hist) {
+        historyCount = hist.count;
+        const daysAgo = (now - hist.lastTs) / ONE_DAY;
+        historyBoost = Math.max(0.1, 1.0 - daysAgo / 90);
+      }
+
+      const pathNameScore = computePathNameScore(r.record.path, req.context);
+      const contentOverlap = computeContentOverlap(r.record.textPreview, req.context);
+      const pathMemoryBoost = usedPathSet.has(r.record.path) ? 1 : 0;
+      const resumeBoost = resumeContext && /resume|cv|简历/i.test(r.record.path) ? 1 : 0;
+
+      const weights = { dense: 0.35, history: 0.10, path: 0.16, content: 0.06, pathMemory: 0.02, resume: 0.31 };
+      const finalScore =
+        denseScore * weights.dense +
+        historyBoost * weights.history +
+        pathNameScore * weights.path +
+        contentOverlap * weights.content +
+        pathMemoryBoost * weights.pathMemory +
+        resumeBoost * weights.resume;
+
+      return {
+        ...r,
+        score: finalScore,
+        historyCount,
+        debug: {
+          denseScore,
+          historyBoost,
+          pathNameScore,
+          contentOverlap,
+          pathMemoryBoost,
+          resumeBoost,
+          weights,
+        },
+      };
+    });
+
+    ranked.sort((a, b) => b.score - a.score);
+    const top = ranked.slice(0, 5);
+
+    logWorkflowStep(
+      workflowId,
+      "match.enhanced.ranking.top_candidates",
+      top.map((r, idx) => ({
+        rank: idx + 1,
+        file: r.record.name,
+        path: r.record.path,
+        finalScore: roundScore(r.score),
+        denseScore: roundScore(r.debug.denseScore),
+        historyBoost: roundScore(r.debug.historyBoost),
+        pathNameScore: roundScore(r.debug.pathNameScore),
+        contentOverlap: roundScore(r.debug.contentOverlap),
+        pathMemoryBoost: r.debug.pathMemoryBoost,
+        resumeBoost: r.debug.resumeBoost,
+        historyCount: r.historyCount,
+        weights: r.debug.weights,
+      })),
+    );
 
     logWorkflowStep(workflowId, "match.enhanced.services_called", Array.from(servicesCalled));
     logWorkflowStep(workflowId, "match.enhanced.done", {
-      returnedCount: results.length,
-      top: results.map((r) => `${r.record.name} (${Math.round(r.score * 100)}%)`),
+      returnedCount: top.length,
+      top: top.map((r) => `${r.record.name} (${Math.round(r.score * 100)}%)`),
     });
 
     return {
       type: "MATCH_RESPONSE",
       workflowId,
-      results: results.map((r) => ({
+      results: top.map((r) => ({
         id: r.record.id,
         name: r.record.name,
         path: r.record.path,
         type: r.record.type,
         score: r.score,
-        historyCount: historyMap.get(r.record.id) || 0,
+        historyCount: r.historyCount,
       })),
     };
   } catch (err) {
@@ -476,6 +631,60 @@ async function handleMatchEnhanced(req: MatchRequestEnhanced): Promise<MatchResp
       pageUrl: req.pageUrl,
       workflowId,
     });
+  }
+}
+
+async function handleClassifyPage(req: PageClassifyRequest): Promise<PageClassifyResponse> {
+  const workflowId = req.workflowId || createWorkflowId("classify-page-bg");
+  logWorkflowStep(workflowId, "classify.page.start", {
+    hasScreenshot: !!req.screenshotBase64,
+    contextPreview: req.context.slice(0, 140),
+    pageUrl: req.pageUrl,
+  });
+
+  try {
+    const config = await getApiConfig();
+    if (!config.apiKey) {
+      logWorkflowError(workflowId, "classify.page.missing_api_key", null);
+      return { type: "PAGE_CLASSIFY_RESPONSE", ok: false, workflowId, error: "missing_api_key" };
+    }
+
+    let screenshotBase64 = req.screenshotBase64;
+    if (!screenshotBase64) {
+      logWorkflowStep(workflowId, "service.chrome.captureVisibleTab.start");
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const windowId = req.windowId ?? chrome.windows.WINDOW_ID_CURRENT;
+        chrome.tabs.captureVisibleTab(windowId, { format: "png" }, (url) => {
+          if (chrome.runtime.lastError || !url) {
+            reject(new Error(chrome.runtime.lastError?.message || "capture_failed"));
+            return;
+          }
+          resolve(url);
+        });
+      });
+      screenshotBase64 = dataUrl.replace(/^data:image\/\w+;base64,/, "");
+      logWorkflowStep(workflowId, "service.chrome.captureVisibleTab.done");
+    }
+
+    if (req.mode === "vlm_gpt") {
+      logWorkflowStep(workflowId, "service.chatgpt.page_classify.start");
+      const label = await describePageTypeWithChatGPT(screenshotBase64, req.context, config.apiKey);
+      logWorkflowStep(workflowId, "service.chatgpt.page_classify.done", {
+        labelPreview: label.slice(0, 160),
+      });
+      return { type: "PAGE_CLASSIFY_RESPONSE", ok: true, workflowId, label };
+    }
+
+    logWorkflowStep(workflowId, "service.gemini.page_classify.start");
+    const label = await describePageTypeWithVLM(screenshotBase64, req.context, config.apiKey);
+    logWorkflowStep(workflowId, "service.gemini.page_classify.done", {
+      labelPreview: label.slice(0, 160),
+    });
+
+    return { type: "PAGE_CLASSIFY_RESPONSE", ok: true, workflowId, label };
+  } catch (err) {
+    logWorkflowError(workflowId, "classify.page.failed", err);
+    return { type: "PAGE_CLASSIFY_RESPONSE", ok: false, workflowId, error: "classify_failed" };
   }
 }
 
