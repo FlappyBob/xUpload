@@ -107,6 +107,88 @@ IndexedDB "xupload_vectors" v5
 | `popup.html` | Rescan button, config section, last scan display |
 | `manifest.dist.json` | Added `alarms` permission |
 
+---
+
+## Sprint 2: Matching Quality & File Access Fixes
+
+### 9. Seamless File Access (No More Folder Picker Popup)
+**Problem:** Every time the user clicked a recommendation, the browser showed a folder picker dialog — because the in-memory `dirHandle` was lost on page navigation/refresh.
+
+**Solution:** Added a 3-tier file access strategy in `getFile()`:
+1. **In-memory handle** (fastest) — used when the user just scanned in the same tab
+2. **Background service worker** — sends `GET_FILE` message to background, which reads from the IndexedDB-persisted `FileSystemDirectoryHandle`. This is the common path.
+3. **Folder picker** (last resort) — only shown if both above fail (e.g. permissions expired)
+
+**Impact:** Files load instantly without any dialog popup in the normal case.
+
+---
+
+### 10. Stop Word Filtering for Better Matching
+**Problem:** Page context like "If you would like to add or update materials in your application..." generates tokens where 80%+ are stop words (`if`, `you`, `would`, `like`, `to`, `or`...). These meaningless tokens dilute the match score to ~1%.
+
+**Solution:** Added a stop word list (80+ common English words) and a `tokenizeFiltered()` function that removes them before scoring. TF-IDF vocabulary building still uses all tokens (stop words have naturally low IDF), but the direct keyword matching functions now operate on meaningful words only.
+
+**Example:** "If you would like to upload your Resume/CV for this application" → filtered to `["upload", "resume", "cv", "application"]`
+
+---
+
+### 11. Overlap Coefficient Scoring (Replacing Ratio-Based Scoring)
+**Problem:** Previous scoring used `matches / total_tokens_in_one_side`. If the page context had 80 tokens and only 3 matched, score = 3/80 = 3.75%. The large denominator killed the signal.
+
+**Solution:** Switched to **Overlap Coefficient**: `matches / min(|A|, |B|)`. This normalizes by the *smaller* set, so a file with 5 meaningful path tokens matching 3 context tokens scores 3/5 = 60% instead of 3/80 = 3.75%.
+
+**Formula comparison:**
+```
+Old: "personal" matched in path → 1/80 context tokens = 1.25%
+New: "personal" matched in path → 1/min(5 path tokens, 12 filtered context tokens) = 1/5 = 20%
+```
+
+---
+
+### 12. Enhanced File Content Extraction
+**Problem:** Images were indexed with filename only. PDFs with compressed streams returned empty text. Path structure (which carries semantic meaning like `resume/`, `tax_documents/`) was ignored.
+
+**Solution:**
+- **Path keywords**: Full file path is now tokenized and included (e.g. `personal_files/resume/cv.pdf` → `personal files resume cv pdf`)
+- **Images**: Added type descriptors (`image photo picture`)
+- **Office docs**: Added type descriptors (`document word`, `spreadsheet excel`, `presentation slides`)
+- **PDF fallback**: When regex extraction fails, path keywords + `pdf document` are used instead of just filename
+- **textPreview**: Increased from 100 → 500 characters for richer content matching
+
+---
+
+### 13. Duplicate Button Fix
+**Problem:** Pages with both a visible `<input type="file">` and a nearby "Upload" submit button got TWO lightning buttons.
+
+**Solution:** Custom upload button detection now skips elements whose nearby file input is already handled by the standard detection path.
+
+---
+
+## Scoring Architecture (Current)
+
+```
+Page Context → tokenizeFiltered() → meaningful keywords
+                                         ↓
+                    ┌────────────────────────────────────┐
+                    │         Multi-Signal Scoring        │
+                    ├────────────────────────────────────┤
+                    │  Signal 1: TF-IDF cosine similarity │
+                    │  Signal 2: Upload history boost     │
+                    │  Signal 3: Path/name overlap coeff  │
+                    │  Signal 4: Content overlap coeff    │
+                    └────────────────────────────────────┘
+                                         ↓
+              TF-IDF useful (>5%)?
+             /                    \
+           YES                     NO (fallback mode)
+     ┌──────────────┐      ┌──────────────────────┐
+     │ TF-IDF  0.45 │      │ History    0.40       │
+     │ History 0.30 │      │ Path/Name  0.35       │
+     │ Path    0.15 │      │ Content    0.25       │
+     │ Content 0.10 │      │ (or 50/50 w/o hist)   │
+     └──────────────┘      └──────────────────────┘
+```
+
 ## What's Next
 - Webpage screenshot capture for richer context
 - NL file descriptions via LLM

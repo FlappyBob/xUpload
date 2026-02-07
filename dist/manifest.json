@@ -3,7 +3,7 @@
   "name": "xUpload",
   "version": "0.1.0",
   "description": "Smart file upload recommendations based on page context",
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "activeTab"],
   "background": {
     "service_worker": "background.js",
     "type": "module"

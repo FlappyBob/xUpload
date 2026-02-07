@@ -99,6 +99,7 @@
   </style>
   <script type="module" crossorigin src="./popup.js"></script>
   <link rel="modulepreload" crossorigin href="./vectordb.js">
+  <link rel="modulepreload" crossorigin href="./workflow.js">
 </head>
 <body>
   <h1>⚡ xUpload</h1>
@@ -119,6 +120,22 @@
         <option value="10">10 min</option>
         <option value="30" selected>30 min</option>
         <option value="60">1 hour</option>
+      </select>
+    </div>
+  </div>
+  <div class="config-section">
+    <div class="config-row" style="margin-bottom: 6px;">
+      <label style="flex:1;">
+        Gemini API Key
+        <input type="password" id="apiKey" placeholder="Enter key..." style="width:100%;margin-top:4px;padding:6px 8px;border:1px solid #d0d0d0;border-radius:4px;font-size:12px;">
+      </label>
+    </div>
+    <div class="config-row">
+      <label>Mode</label>
+      <select id="matchMode" style="flex:1;">
+        <option value="tfidf">TF-IDF (no API)</option>
+        <option value="fast">Fast (Gemini Embedding)</option>
+        <option value="vlm">VLM (Screenshot + Gemini)</option>
       </select>
     </div>
   </div>

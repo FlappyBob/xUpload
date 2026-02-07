@@ -6,6 +6,21 @@
 
 // ---- Tokenizer ----
 
+/** Common English stop words to filter out for better signal */
+const STOP_WORDS = new Set([
+  "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+  "have", "has", "had", "do", "does", "did", "will", "would", "shall",
+  "should", "may", "might", "must", "can", "could",
+  "i", "me", "my", "we", "our", "you", "your", "he", "him", "his",
+  "she", "her", "it", "its", "they", "them", "their",
+  "this", "that", "these", "those", "am", "if", "or", "and", "but",
+  "not", "no", "nor", "so", "as", "at", "by", "for", "in", "of",
+  "on", "to", "up", "from", "with", "into", "out", "about",
+  "all", "any", "each", "some", "such", "than", "too", "very",
+  "just", "also", "how", "what", "when", "where", "which", "who",
+  "here", "there", "then", "only", "after", "before",
+]);
+
 export function tokenize(text: string): string[] {
   const normalized = text.toLowerCase().trim();
   const tokens: string[] = [];
@@ -22,6 +37,11 @@ export function tokenize(text: string): string[] {
   }
 
   return tokens;
+}
+
+/** Tokenize with stop word removal — for matching/scoring (not for TF-IDF) */
+export function tokenizeFiltered(text: string): string[] {
+  return tokenize(text).filter((t) => !STOP_WORDS.has(t) && t.length > 1);
 }
 
 // ---- Vocabulary & IDF (module-level state) ----
@@ -86,30 +106,48 @@ export function vectorize(tokens: string[]): number[] {
 
 // ---- File content extraction ----
 
-export async function extractText(file: File): Promise<string> {
+export async function extractText(file: File, filePath?: string): Promise<string> {
   const name = file.name.replace(/[._-]/g, " ");
   const ext = file.name.split(".").pop()?.toLowerCase() || "";
+
+  // Include path segments as keywords (e.g. "resume/cv.pdf" → "resume cv pdf")
+  const pathKeywords = filePath
+    ? filePath.replace(/[/\\._-]/g, " ")
+    : name;
 
   if (isTextFile(ext)) {
     try {
       const text = await file.text();
-      return `${name} ${text.slice(0, 2000)}`;
+      return `${pathKeywords} ${text.slice(0, 2000)}`;
     } catch {
-      return name;
+      return pathKeywords;
     }
   }
 
   if (ext === "pdf") {
     try {
       const text = await extractPdfText(file);
-      return `${name} ${text.slice(0, 2000)}`;
+      if (text.length > 10) {
+        return `${pathKeywords} ${text.slice(0, 2000)}`;
+      }
+      // If regex extraction failed, use path + metadata keywords
+      return `${pathKeywords} pdf document`;
     } catch {
-      return name;
+      return `${pathKeywords} pdf document`;
     }
   }
 
-  // Images / binary: filename only
-  return name;
+  // Images: use path keywords + common descriptors based on extension
+  if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "tiff", "heic"].includes(ext)) {
+    return `${pathKeywords} image photo picture`;
+  }
+
+  // Office documents
+  if (["doc", "docx"].includes(ext)) return `${pathKeywords} document word`;
+  if (["xls", "xlsx"].includes(ext)) return `${pathKeywords} spreadsheet excel`;
+  if (["ppt", "pptx"].includes(ext)) return `${pathKeywords} presentation slides`;
+
+  return pathKeywords;
 }
 
 function isTextFile(ext: string): boolean {

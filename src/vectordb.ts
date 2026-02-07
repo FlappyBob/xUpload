@@ -11,7 +11,8 @@ export interface VectorRecord {
   type: string;
   size: number;
   lastModified: number;
-  vector: number[];        // embedding vector
+  vector: number[];        // TF-IDF embedding vector
+  denseVector?: number[];  // Gemini embedding (768-dim, optional)
   textPreview: string;     // first N chars of extracted text
 }
 
@@ -320,5 +321,85 @@ export async function saveRescanConfig(config: RescanConfig): Promise<void> {
     tx.objectStore(CONFIG_STORE).put(config, "rescan");
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+  });
+}
+
+// ---- Dense vector search (for Gemini embeddings) ----
+
+export async function denseSearch(
+  queryVector: number[],
+  topN: number = 5,
+  acceptFilter?: string
+): Promise<SearchResult[]> {
+  const all = await getAll();
+  // Only consider records that have dense vectors
+  let candidates = all.filter((r) => r.denseVector && r.denseVector.length > 0);
+
+  if (candidates.length === 0) return [];
+
+  if (acceptFilter) {
+    const accepts = acceptFilter.split(",").map((s) => s.trim().toLowerCase());
+    const filtered = candidates.filter((r) => {
+      const ext = "." + r.name.split(".").pop()?.toLowerCase();
+      const mime = r.type.toLowerCase();
+      return accepts.some(
+        (a) =>
+          a === ext ||
+          a === mime ||
+          (a.endsWith("/*") && mime.startsWith(a.replace("/*", "/")))
+      );
+    });
+    if (filtered.length > 0) candidates = filtered;
+  }
+
+  return candidates
+    .map((record) => ({ record, score: cosine(queryVector, record.denseVector!) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topN)
+    .filter((r) => r.score > 0);
+}
+
+// ---- Persistent path memory ----
+
+interface PathMemoryStore {
+  [websiteHost: string]: string[];
+}
+
+export async function saveUsedPath(host: string, filePath: string): Promise<void> {
+  const db = await openDB();
+  const memory: PathMemoryStore = await new Promise((resolve, reject) => {
+    const tx = db.transaction(CONFIG_STORE, "readonly");
+    const req = tx.objectStore(CONFIG_STORE).get("pathMemory");
+    req.onsuccess = () => resolve(req.result ?? {});
+    req.onerror = () => reject(req.error);
+  });
+
+  const paths = memory[host] || [];
+  // Remove if already exists, then prepend
+  const idx = paths.indexOf(filePath);
+  if (idx !== -1) paths.splice(idx, 1);
+  paths.unshift(filePath);
+  // Keep max 20
+  if (paths.length > 20) paths.length = 20;
+  memory[host] = paths;
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CONFIG_STORE, "readwrite");
+    tx.objectStore(CONFIG_STORE).put(memory, "pathMemory");
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getUsedPaths(host: string): Promise<string[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(CONFIG_STORE, "readonly");
+    const req = tx.objectStore(CONFIG_STORE).get("pathMemory");
+    req.onsuccess = () => {
+      const memory: PathMemoryStore = req.result ?? {};
+      resolve(memory[host] || []);
+    };
+    req.onerror = () => reject(req.error);
   });
 }

@@ -1,4 +1,5 @@
-import type { MatchRequest, MatchResponse, MatchResultItem } from "./types";
+import type { MatchRequest, MatchRequestEnhanced, MatchResponse, MatchResultItem, XUploadConfig } from "./types";
+import { createWorkflowId, logWorkflowError, logWorkflowStep } from "./workflow";
 
 const BUTTON_CLASS = "xupload-btn";
 const PANEL_CLASS = "xupload-panel";
@@ -41,12 +42,17 @@ function findUploadTargets(): UploadTarget[] {
     }
   });
 
+  // Collect all anchors we already target (to avoid duplicates)
+  const targetedAnchors = new Set<Element>(targets.map((t) => t.anchor));
+  const targetedInputs = new Set<Element>(targets.filter((t) => t.fileInput).map((t) => t.fileInput!));
+
   // 2. Custom upload buttons: buttons/links with upload text that trigger hidden file inputs
   const buttons = document.querySelectorAll<HTMLElement>(
     'button, a, [role="button"], label[for], .upload-btn, [class*="upload"], [class*="Upload"]'
   );
   buttons.forEach((btn) => {
     if (processed.has(btn)) return;
+    if (targetedAnchors.has(btn)) return;
     const text = btn.textContent || "";
     if (!UPLOAD_KEYWORDS.test(text)) return;
     // Skip if we already processed this area
@@ -55,6 +61,19 @@ function findUploadTargets(): UploadTarget[] {
 
     // Try to find a nearby hidden file input
     const fileInput = findNearbyFileInput(btn);
+
+    // Skip if the nearby file input is already targeted by a standard detection
+    if (fileInput && targetedInputs.has(fileInput)) return;
+
+    // Skip if there's already a visible file input nearby that we're handling
+    // (e.g. "Upload" submit button next to a file input)
+    if (!fileInput) {
+      const parent = btn.closest("form, fieldset, div, section, tr, li") || btn.parentElement;
+      if (parent) {
+        const nearbyVisibleInput = parent.querySelector<HTMLInputElement>('input[type="file"]');
+        if (nearbyVisibleInput && (targetedInputs.has(nearbyVisibleInput) || targetedAnchors.has(nearbyVisibleInput))) return;
+      }
+    }
 
     targets.push({
       anchor: btn,
@@ -210,16 +229,17 @@ const TEXT_EXTS = [
   "log", "yaml", "yml", "toml", "ini", "rtf",
 ];
 
-async function extractFileText(file: File): Promise<string> {
+async function extractFileText(file: File, filePath?: string): Promise<string> {
   const name = file.name.replace(/[._-]/g, " ");
   const ext = file.name.split(".").pop()?.toLowerCase() || "";
+  const pathKeywords = filePath ? filePath.replace(/[/\\._-]/g, " ") : name;
 
   if (TEXT_EXTS.includes(ext)) {
     try {
       const text = await file.text();
-      return `${name} ${text.slice(0, 2000)}`;
+      return `${pathKeywords} ${text.slice(0, 2000)}`;
     } catch {
-      return name;
+      return pathKeywords;
     }
   }
 
@@ -240,23 +260,38 @@ async function extractFileText(file: File): Promise<string> {
         while ((t = tj.exec(m[1])) !== null) parts.push(t[1]);
       }
       const pdfText = parts.join(" ").replace(/\\n/g, " ").replace(/\s+/g, " ").trim();
-      return `${name} ${pdfText.slice(0, 2000)}`;
+      if (pdfText.length > 10) {
+        return `${pathKeywords} ${pdfText.slice(0, 2000)}`;
+      }
+      return `${pathKeywords} pdf document`;
     } catch {
-      return name;
+      return `${pathKeywords} pdf document`;
     }
   }
 
-  return name;
+  // Images
+  if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "tiff", "heic"].includes(ext)) {
+    return `${pathKeywords} image photo picture`;
+  }
+  // Office docs
+  if (["doc", "docx"].includes(ext)) return `${pathKeywords} document word`;
+  if (["xls", "xlsx"].includes(ext)) return `${pathKeywords} spreadsheet excel`;
+  if (["ppt", "pptx"].includes(ext)) return `${pathKeywords} presentation slides`;
+
+  return pathKeywords;
 }
 
 // ---- Folder scanning ----
 
-async function scanFolder(statusEl?: HTMLElement): Promise<boolean> {
+async function scanFolder(statusEl?: HTMLElement, workflowId: string = createWorkflowId("scan-inline")): Promise<boolean> {
+  logWorkflowStep(workflowId, "scan.inline.start");
   try {
+    logWorkflowStep(workflowId, "service.filesystem.showDirectoryPicker.start");
     dirHandle = await (window as any).showDirectoryPicker({ mode: "read" });
+    logWorkflowStep(workflowId, "service.filesystem.showDirectoryPicker.done");
   } catch (err: any) {
     if (err.name === "AbortError") return false;
-    console.error("[xUpload] Folder picker error:", err);
+    logWorkflowError(workflowId, "scan.inline.showDirectoryPicker.failed", err);
     return false;
   }
   if (!dirHandle) return false;
@@ -264,15 +299,17 @@ async function scanFolder(statusEl?: HTMLElement): Promise<boolean> {
   if (statusEl) statusEl.textContent = "Scanning files...";
 
   const entries = await collectFiles(dirHandle, "");
+  logWorkflowStep(workflowId, "service.filesystem.collectFiles.done", { discoveredFiles: entries.length });
   if (statusEl) statusEl.textContent = `Found ${entries.length} files. Reading...`;
 
   const files: { path: string; name: string; type: string; size: number; lastModified: number; text: string }[] = [];
+  let unreadable = 0;
 
   for (let i = 0; i < entries.length; i++) {
     const { fileHandle, path } = entries[i];
     try {
       const file = await fileHandle.getFile();
-      const text = await extractFileText(file);
+      const text = await extractFileText(file, path);
       files.push({
         path,
         name: file.name,
@@ -282,7 +319,7 @@ async function scanFolder(statusEl?: HTMLElement): Promise<boolean> {
         text,
       });
     } catch {
-      // skip unreadable
+      unreadable++;
     }
     if (i % 10 === 0 && statusEl) {
       statusEl.textContent = `Reading files... ${i + 1}/${entries.length}`;
@@ -290,43 +327,57 @@ async function scanFolder(statusEl?: HTMLElement): Promise<boolean> {
   }
 
   if (statusEl) statusEl.textContent = "Building index...";
+  logWorkflowStep(workflowId, "scan.inline.read.done", {
+    processedFiles: files.length,
+    unreadable,
+  });
 
-  const resp = await chrome.runtime.sendMessage({ type: "BUILD_INDEX", files });
-  console.log("[xUpload] Index built:", resp);
+  const resp = await chrome.runtime.sendMessage({ type: "BUILD_INDEX", files, workflowId });
+  logWorkflowStep(workflowId, "service.background.BUILD_INDEX.done", resp);
 
   if (statusEl) statusEl.textContent = `Done! ${resp?.count || files.length} files indexed.`;
+  logWorkflowStep(workflowId, "scan.inline.done", {
+    indexedFiles: resp?.count || files.length,
+  });
   return true;
 }
 
 // ---- Recommendation flow ----
 
 async function handleRecommend(target: UploadTarget, btn: HTMLButtonElement) {
+  const workflowId = createWorkflowId("recommend");
   document.querySelectorAll(`.${PANEL_CLASS}`).forEach((el) => el.remove());
 
-  console.log("[xUpload] ⚡ clicked! Context:", target.context.slice(0, 100));
+  logWorkflowStep(workflowId, "recommend.start", {
+    contextPreview: target.context.slice(0, 140),
+    accept: target.accept || "(none)",
+    url: window.location.href,
+  });
 
   try {
     // Check if we have an index
+    logWorkflowStep(workflowId, "service.background.GET_INDEX_COUNT.start");
     const countResp = await chrome.runtime.sendMessage({ type: "GET_INDEX_COUNT" });
+    logWorkflowStep(workflowId, "service.background.GET_INDEX_COUNT.done", countResp);
 
     if (!countResp?.count || countResp.count === 0) {
       // No index — show scan prompt
-      showScanPanel(btn, target);
+      showScanPanel(btn, target, workflowId);
       return;
     }
 
     // We have an index — proceed with matching
-    await doMatch(btn, target);
+    await doMatch(btn, target, workflowId);
   } catch (err: any) {
-    console.error("[xUpload] Error:", err);
+    logWorkflowError(workflowId, "recommend.failed", err);
     const msg = err?.message?.includes("Extension context invalidated")
       ? "Extension was updated. Please refresh this page."
       : "Error getting recommendations.";
-    showPanel(btn, target, [], msg);
+    showPanel(btn, target, [], msg, workflowId);
   }
 }
 
-function showScanPanel(anchor: HTMLElement, target: UploadTarget) {
+function showScanPanel(anchor: HTMLElement, target: UploadTarget, workflowId: string) {
   const panel = document.createElement("div");
   panel.className = PANEL_CLASS;
 
@@ -351,11 +402,13 @@ function showScanPanel(anchor: HTMLElement, target: UploadTarget) {
     scanBtn.disabled = true;
     scanBtn.textContent = "Scanning...";
 
-    const ok = await scanFolder(statusDiv);
+    const scanWorkflowId = createWorkflowId("scan-inline");
+    logWorkflowStep(workflowId, "recommend.inline_scan.requested", { scanWorkflowId });
+    const ok = await scanFolder(statusDiv, scanWorkflowId);
     if (ok) {
       panel.remove();
       // Now do the match
-      await doMatch(anchor, target);
+      await doMatch(anchor, target, workflowId);
     } else {
       scanBtn.disabled = false;
       scanBtn.textContent = "Select folder to scan";
@@ -380,24 +433,121 @@ function showScanPanel(anchor: HTMLElement, target: UploadTarget) {
   document.body.appendChild(panel);
 }
 
-async function doMatch(anchor: HTMLElement, target: UploadTarget) {
+async function getConfig(): Promise<XUploadConfig> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get("xupload_config", (data) => {
+      resolve(data.xupload_config || { apiKey: "", mode: "tfidf" });
+    });
+  });
+}
+
+async function doMatch(anchor: HTMLElement, target: UploadTarget, workflowId: string) {
+  const config = await getConfig();
+  logWorkflowStep(workflowId, "recommend.config.loaded", {
+    mode: config.mode,
+    hasApiKey: !!config.apiKey,
+  });
+
+  // Use enhanced matching for fast/vlm modes with API key
+  if (config.apiKey && config.mode !== "tfidf") {
+    let screenshotBase64: string | undefined;
+
+    // VLM mode: capture screenshot
+    if (config.mode === "vlm") {
+      try {
+        const rect = anchor.getBoundingClientRect();
+        const captureResp = await chrome.runtime.sendMessage({ type: "CAPTURE_TAB" });
+        if (captureResp?.base64) {
+          // Crop screenshot to area around the upload element
+          screenshotBase64 = await cropScreenshot(captureResp.base64, {
+            top: Math.max(0, rect.top - 150),
+            left: Math.max(0, rect.left - 100),
+            width: Math.min(800, window.innerWidth - rect.left + 200),
+            height: Math.min(600, 400),
+          });
+        }
+      } catch (err) {
+        logWorkflowError(workflowId, "service.background.CAPTURE_TAB.failed", err);
+      }
+    }
+
+    const msg: MatchRequestEnhanced = {
+      type: "MATCH_REQUEST_ENHANCED",
+      context: target.context,
+      accept: target.accept,
+      pageUrl: window.location.href,
+      workflowId,
+      mode: config.mode,
+      screenshotBase64,
+    };
+
+    const resp: MatchResponse = await chrome.runtime.sendMessage(msg);
+    logWorkflowStep(workflowId, "service.background.MATCH_REQUEST_ENHANCED.done", {
+      responseWorkflowId: resp?.workflowId,
+      resultCount: resp?.results?.length || 0,
+    });
+
+    if (!resp?.results?.length) {
+      showPanel(anchor, target, [], "No matching files found.", workflowId);
+      return;
+    }
+
+    showPanel(anchor, target, resp.results, undefined, workflowId);
+    return;
+  }
+
+  // TF-IDF fallback
   const msg: MatchRequest = {
     type: "MATCH_REQUEST",
     context: target.context,
     accept: target.accept,
     pageUrl: window.location.href,
+    workflowId,
   };
 
   const resp: MatchResponse = await chrome.runtime.sendMessage(msg);
-  console.log("[xUpload] Response:", resp);
+  logWorkflowStep(workflowId, "service.background.MATCH_REQUEST.done", {
+    responseWorkflowId: resp?.workflowId,
+    resultCount: resp?.results?.length || 0,
+  });
 
   if (!resp?.results?.length) {
-    showPanel(anchor, target, [], "No matching files found.");
+    showPanel(anchor, target, [], "No matching files found.", workflowId);
     return;
   }
 
-  console.log("[xUpload] Showing", resp.results.length, "results");
-  showPanel(anchor, target, resp.results);
+  logWorkflowStep(workflowId, "recommend.results.shown", { resultCount: resp.results.length });
+  showPanel(anchor, target, resp.results, undefined, workflowId);
+}
+
+/** Crop a base64 PNG screenshot to a specific region using OffscreenCanvas */
+async function cropScreenshot(
+  base64: string,
+  region: { top: number; left: number; width: number; height: number }
+): Promise<string> {
+  // Create an image from the base64 data
+  const img = new Image();
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = reject;
+    img.src = `data:image/png;base64,${base64}`;
+  });
+
+  // Account for device pixel ratio
+  const dpr = window.devicePixelRatio || 1;
+  const cropX = region.left * dpr;
+  const cropY = region.top * dpr;
+  const cropW = region.width * dpr;
+  const cropH = region.height * dpr;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = cropW;
+  canvas.height = cropH;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+  // Return as base64 without prefix
+  return canvas.toDataURL("image/png").replace(/^data:image\/\w+;base64,/, "");
 }
 
 // ---- Recommendation panel ----
@@ -406,7 +556,8 @@ function showPanel(
   anchor: HTMLElement,
   target: UploadTarget,
   results: MatchResultItem[],
-  emptyMsg?: string
+  emptyMsg?: string,
+  workflowId: string = createWorkflowId("panel")
 ) {
   const panel = document.createElement("div");
   panel.className = PANEL_CLASS;
@@ -472,21 +623,27 @@ function showPanel(
         e.stopPropagation();
         scoreSpan.textContent = "...";
         li.classList.add("xupload-loading");
+        logWorkflowStep(workflowId, "recommend.file.click", {
+          fileId: r.id,
+          fileName: r.name,
+          score: Math.round(r.score * 100),
+        });
 
         // Read the file for preview
-        const file = await getFile(r.id);
+        const file = await getFile(r.id, workflowId);
         li.classList.remove("xupload-loading");
         scoreSpan.textContent = `${pct}%`;
 
         if (!file) {
           scoreSpan.textContent = "Error";
           scoreSpan.style.color = "#ea4335";
+          logWorkflowStep(workflowId, "recommend.file.read_failed", { fileId: r.id });
           return;
         }
 
         // Show preview — on confirm, fill the input
         panel.remove();
-        showPreview(anchor, target, file, r);
+        showPreview(anchor, target, file, r, workflowId);
       });
 
       list.appendChild(li);
@@ -528,25 +685,46 @@ function getFileExt(name: string): string {
   return name.split(".").pop()?.toLowerCase() || "";
 }
 
-/** Read a file (with folder re-selection fallback) */
-async function getFile(fileId: string): Promise<File | null> {
+/** Read a file: try local handle → background handle (no automatic picker popup). */
+async function getFile(fileId: string, workflowId: string): Promise<File | null> {
+  // Strategy 1: Use in-memory directory handle (fastest)
+  logWorkflowStep(workflowId, "service.content.readFileFromHandle.start", { fileId });
   let file = await readFileFromHandle(fileId);
-  if (!file) {
-    try {
-      dirHandle = await (window as any).showDirectoryPicker({ mode: "read" });
-      if (dirHandle) file = await readFileFromHandle(fileId);
-    } catch (err: any) {
-      if (err.name !== "AbortError") console.error("[xUpload] Folder picker error:", err);
-    }
+  if (file) {
+    logWorkflowStep(workflowId, "service.content.readFileFromHandle.done", { source: "in_memory_handle" });
+    return file;
   }
-  return file;
+
+  // Strategy 2: Ask background to read via persisted IndexedDB handle
+  try {
+    logWorkflowStep(workflowId, "service.background.GET_FILE.start", { fileId });
+    const resp = await chrome.runtime.sendMessage({ type: "GET_FILE", id: fileId });
+    if (resp && !resp.error && resp.base64) {
+      const binary = atob(resp.base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      logWorkflowStep(workflowId, "service.background.GET_FILE.done", { source: "background_handle" });
+      return new File([bytes], resp.name, { type: resp.type, lastModified: resp.lastModified });
+    }
+    logWorkflowStep(workflowId, "service.background.GET_FILE.empty", resp?.error || "no_data");
+  } catch (err) {
+    logWorkflowError(workflowId, "service.background.GET_FILE.failed", err);
+  }
+
+  // Do not auto-open picker anymore; keep flow seamless.
+  logWorkflowStep(workflowId, "service.content.read_file.failed", {
+    reason: "missing_or_expired_directory_permission",
+    action: "rescan_from_popup_if_needed",
+  });
+  return null;
 }
 
 function showPreview(
   anchor: HTMLElement,
   target: UploadTarget,
   file: File,
-  result: MatchResultItem
+  result: MatchResultItem,
+  workflowId: string
 ) {
   document.querySelectorAll(`.${PANEL_CLASS}`).forEach((el) => el.remove());
 
@@ -619,7 +797,7 @@ function showPreview(
     URL.revokeObjectURL(blobUrl);
     panel.remove();
     // Re-show the recommendation list
-    doMatch(anchor, target);
+    doMatch(anchor, target, workflowId);
   });
 
   const useBtn = document.createElement("button");
@@ -631,16 +809,25 @@ function showPreview(
     e.stopPropagation();
     useBtn.disabled = true;
     useBtn.textContent = "Filling...";
+    logWorkflowStep(workflowId, "recommend.fill.start", {
+      fileId: result.id,
+      fileName: result.name,
+      path: result.path,
+    });
 
-    const success = await fillFileWithObj(target, file);
+    const success = fillFileWithObj(target, file);
+
     URL.revokeObjectURL(blobUrl);
 
     if (success) {
+      logWorkflowStep(workflowId, "recommend.fill.done", {
+        method: "setFileInput_or_drop",
+      });
       useBtn.textContent = "\u2713 Done";
       useBtn.classList.add("xupload-preview-done");
       setTimeout(() => panel.remove(), 600);
 
-      // Track upload history
+      // Track upload history + path memory (fire-and-forget)
       try {
         chrome.runtime.sendMessage({
           type: "TRACK_UPLOAD",
@@ -654,9 +841,19 @@ function showPreview(
             uploadContext: target.context.slice(0, 200),
             timestamp: Date.now(),
           },
+        }, () => { void chrome.runtime.lastError; });
+        chrome.runtime.sendMessage({
+          type: "SAVE_USED_PATH",
+          host: new URL(window.location.href).hostname,
+          filePath: result.path,
+        }, () => { void chrome.runtime.lastError; });
+        logWorkflowStep(workflowId, "recommend.memory.saved", {
+          host: new URL(window.location.href).hostname,
+          filePath: result.path,
         });
       } catch { /* non-critical */ }
     } else {
+      logWorkflowStep(workflowId, "recommend.fill.failed");
       useBtn.textContent = "Error";
       useBtn.disabled = false;
     }
@@ -734,60 +931,6 @@ function setFileInput(input: HTMLInputElement, file: File) {
   input.files = dt.files;
   input.dispatchEvent(new Event("change", { bubbles: true }));
   input.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
-async function fillFile(target: UploadTarget, fileId: string, fileName: string, fileType: string): Promise<boolean> {
-  try {
-    // Strategy A: Read from in-memory directory handle (preferred)
-    let file = await readFileFromHandle(fileId);
-
-    // Strategy B: No handle — ask user to re-select the folder
-    if (!file) {
-      console.log("[xUpload] No handle, asking user to select folder");
-      try {
-        dirHandle = await (window as any).showDirectoryPicker({ mode: "read" });
-        if (dirHandle) {
-          file = await readFileFromHandle(fileId);
-        }
-      } catch (err: any) {
-        if (err.name !== "AbortError") {
-          console.error("[xUpload] Folder picker error:", err);
-        }
-      }
-    }
-
-    if (!file) {
-      console.error("[xUpload] Could not read file:", fileId);
-      return false;
-    }
-
-    // Fill the file input
-    if (target.fileInput) {
-      setFileInput(target.fileInput, file);
-      return true;
-    }
-
-    const fileInput = findNearbyFileInput(target.anchor);
-    if (fileInput) {
-      setFileInput(fileInput, file);
-      return true;
-    }
-
-    // Simulate drop event
-    const dropTarget = target.anchor.closest("[class*='upload'], [class*='Upload'], [class*='drop']") || target.anchor;
-    const dtObj = new DataTransfer();
-    dtObj.items.add(file);
-    const dropEvent = new DragEvent("drop", {
-      bubbles: true,
-      cancelable: true,
-      dataTransfer: dtObj,
-    });
-    dropTarget.dispatchEvent(dropEvent);
-    return true;
-  } catch (err) {
-    console.error("[xUpload] Fill error:", err);
-    return false;
-  }
 }
 
 // ---- Scan and inject ----

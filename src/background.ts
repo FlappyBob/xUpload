@@ -1,5 +1,6 @@
 import {
   tokenize,
+  tokenizeFiltered,
   vectorize,
   buildVocabulary,
   exportVocab,
@@ -8,6 +9,7 @@ import {
 } from "./embeddings";
 import {
   search,
+  denseSearch,
   getCount,
   getFileData,
   upsert,
@@ -21,8 +23,12 @@ import {
   getDirectoryHandle,
   getRescanConfig,
   saveRescanConfig,
+  saveUsedPath,
+  getUsedPaths,
 } from "./vectordb";
-import type { MatchRequest, MatchResponse, UploadHistoryEntry } from "./types";
+import type { MatchRequest, MatchRequestEnhanced, MatchResponse, UploadHistoryEntry, XUploadConfig } from "./types";
+import { getEmbedding, batchEmbed, describeWithVLM } from "./apiEmbeddings";
+import { createWorkflowId, logWorkflowError, logWorkflowStep, roundScore } from "./workflow";
 
 async function ensureVocab(): Promise<void> {
   if (getVocabSize() > 0) return;
@@ -70,7 +76,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === "BUILD_INDEX") {
-    handleBuildIndex(msg.files).then(sendResponse);
+    handleBuildIndex(msg.files, msg.workflowId).then(sendResponse);
     return true;
   }
 
@@ -105,6 +111,31 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === "MATCH_REQUEST_ENHANCED") {
+    handleMatchEnhanced(msg as MatchRequestEnhanced).then(sendResponse);
+    return true;
+  }
+
+  if (msg.type === "CAPTURE_TAB") {
+    chrome.tabs.captureVisibleTab({ format: "png" }, (dataUrl) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ error: chrome.runtime.lastError.message });
+        return;
+      }
+      // Strip data:image/png;base64, prefix
+      const base64 = dataUrl?.replace(/^data:image\/\w+;base64,/, "") || "";
+      sendResponse({ base64 });
+    });
+    return true;
+  }
+
+  if (msg.type === "SAVE_USED_PATH") {
+    saveUsedPath(msg.host, msg.filePath)
+      .then(() => sendResponse({ ok: true }))
+      .catch(() => sendResponse({ ok: false }));
+    return true;
+  }
+
   if (msg.type === "RESCAN_CONFIG_UPDATED") {
     setupRescanAlarm().then(() => sendResponse({ ok: true }));
     return true;
@@ -113,100 +144,339 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // ---- Multi-level recommendation ----
 
+/**
+ * Compute keyword overlap between file path and page context.
+ * Uses filtered tokens (no stop words) and Jaccard-like scoring.
+ */
 function computePathNameScore(filePath: string, context: string): number {
-  const pathTokens = tokenize(filePath.replace(/[/\\._-]/g, " "));
-  const contextTokens = new Set(tokenize(context));
-  if (pathTokens.length === 0 || contextTokens.size === 0) return 0;
+  const pathTokens = new Set(tokenizeFiltered(filePath.replace(/[/\\._-]/g, " ")));
+  const contextTokens = new Set(tokenizeFiltered(context));
+  if (pathTokens.size === 0 || contextTokens.size === 0) return 0;
 
   let matches = 0;
   for (const t of pathTokens) {
     if (contextTokens.has(t)) matches++;
   }
-  return matches / pathTokens.length;
+
+  // Use the smaller set as denominator (Overlap coefficient)
+  // This prevents dilution when one side has many more tokens
+  const minSize = Math.min(pathTokens.size, contextTokens.size);
+  return matches / minSize;
+}
+
+/**
+ * Compute keyword overlap between file content/preview and page context.
+ * Uses filtered tokens (no stop words) and Overlap coefficient.
+ */
+function computeContentOverlap(textPreview: string, context: string): number {
+  const fileTokens = new Set(tokenizeFiltered(textPreview));
+  const contextTokens = new Set(tokenizeFiltered(context));
+  if (fileTokens.size === 0 || contextTokens.size === 0) return 0;
+
+  let matches = 0;
+  for (const t of contextTokens) {
+    if (fileTokens.has(t)) matches++;
+  }
+
+  // Overlap coefficient: matches / min(|A|, |B|)
+  const minSize = Math.min(fileTokens.size, contextTokens.size);
+  return matches / minSize;
 }
 
 async function handleMatch(req: MatchRequest): Promise<MatchResponse> {
-  await ensureVocab();
+  const workflowId = req.workflowId || createWorkflowId("match-bg");
+  const servicesCalled = new Set<string>();
 
-  console.log("[xUpload] MATCH context:", req.context.slice(0, 100));
-
-  const queryTokens = tokenize(req.context);
-  const queryVec = vectorize(queryTokens);
-
-  if (queryVec.length === 0) {
-    console.warn("[xUpload] Empty vector — vocab size:", getVocabSize());
-    return { type: "MATCH_RESPONSE", results: [] };
-  }
-
-  // Get more results for re-ranking
-  const results = await search(queryVec, 15, req.accept);
-
-  // Get upload history for the current website
-  let history: UploadHistoryEntry[] = [];
-  if (req.pageUrl) {
-    try {
-      const host = new URL(req.pageUrl).hostname;
-      history = await getHistoryByHost(host);
-    } catch { /* ignore invalid URL */ }
-  }
-
-  // Build a map of fileId -> most recent upload timestamp for this host
-  const historyMap = new Map<string, { count: number; lastTs: number }>();
-  for (const h of history) {
-    const existing = historyMap.get(h.fileId);
-    if (!existing) {
-      historyMap.set(h.fileId, { count: 1, lastTs: h.timestamp });
-    } else {
-      existing.count++;
-      existing.lastTs = Math.max(existing.lastTs, h.timestamp);
-    }
-  }
-
-  const ONE_DAY = 24 * 60 * 60 * 1000;
-  const now = Date.now();
-
-  // Re-rank with multi-level scoring
-  const ranked = results.map((r) => {
-    const tfidfScore = r.score;
-
-    // History-based boost (recency-weighted)
-    let historyBoost = 0;
-    let historyCount = 0;
-    const hist = historyMap.get(r.record.id);
-    if (hist) {
-      historyCount = hist.count;
-      const daysAgo = (now - hist.lastTs) / ONE_DAY;
-      historyBoost = Math.max(0.1, 1.0 - daysAgo / 90);
-    }
-
-    // Path/filename matching
-    const pathNameScore = computePathNameScore(r.record.path, req.context);
-
-    // Weighted combination
-    const hasHistory = historyBoost > 0;
-    const finalScore = hasHistory
-      ? tfidfScore * 0.5 + historyBoost * 0.35 + pathNameScore * 0.15
-      : tfidfScore * 0.75 + pathNameScore * 0.25;
-
-    return { ...r, score: finalScore, historyCount };
+  logWorkflowStep(workflowId, "match.start", {
+    contextPreview: req.context.slice(0, 140),
+    accept: req.accept || "(none)",
+    pageUrl: req.pageUrl || "(none)",
   });
 
-  ranked.sort((a, b) => b.score - a.score);
-  const top = ranked.slice(0, 5).filter((r) => r.score > 0);
+  try {
+    servicesCalled.add("background.ensureVocab");
+    await ensureVocab();
 
-  console.log("[xUpload] Results:", top.map(r => `${r.record.name} (${Math.round(r.score * 100)}%)`));
+    const queryTokens = tokenize(req.context);
+    const queryVec = vectorize(queryTokens);
+    logWorkflowStep(workflowId, "service.tfidf.vectorize", {
+      queryTokenCount: queryTokens.length,
+      queryVectorSize: queryVec.length,
+    });
 
-  return {
-    type: "MATCH_RESPONSE",
-    results: top.map((r) => ({
-      id: r.record.id,
-      name: r.record.name,
+    servicesCalled.add("vectordb.search");
+    const tfidfResults = queryVec.length > 0
+      ? await search(queryVec, 15, req.accept)
+      : [];
+
+    const maxTfidf = tfidfResults.length > 0
+      ? Math.max(...tfidfResults.map((r) => r.score))
+      : 0;
+    const tfidfUseful = maxTfidf > 0.05;
+    logWorkflowStep(workflowId, "service.vectordb.search.done", {
+      candidateCount: tfidfResults.length,
+      maxTfidf: roundScore(maxTfidf),
+      tfidfUseful,
+    });
+
+    let allRecords = tfidfResults;
+    if (!tfidfUseful) {
+      servicesCalled.add("vectordb.getAll");
+      const all = await getAll();
+      allRecords = all.map((record) => ({ record, score: 0 }));
+      logWorkflowStep(workflowId, "ranking.fallback.path_content", {
+        reason: "tfidf_low_signal",
+        maxTfidf: roundScore(maxTfidf),
+        fullCandidateCount: allRecords.length,
+      });
+    }
+
+    let pageHost = "";
+    if (req.pageUrl) {
+      try {
+        pageHost = new URL(req.pageUrl).hostname;
+      } catch {
+        pageHost = "";
+      }
+    }
+
+    let history: UploadHistoryEntry[] = [];
+    let usedPaths: string[] = [];
+    if (pageHost) {
+      servicesCalled.add("vectordb.getHistoryByHost");
+      servicesCalled.add("vectordb.getUsedPaths");
+      history = await getHistoryByHost(pageHost);
+      usedPaths = await getUsedPaths(pageHost);
+      logWorkflowStep(workflowId, "service.history.lookup.done", {
+        host: pageHost,
+        historyRows: history.length,
+        memorizedPaths: usedPaths.length,
+      });
+    }
+
+    const usedPathSet = new Set(usedPaths);
+    const historyMap = new Map<string, { count: number; lastTs: number }>();
+    for (const h of history) {
+      const existing = historyMap.get(h.fileId);
+      if (!existing) {
+        historyMap.set(h.fileId, { count: 1, lastTs: h.timestamp });
+      } else {
+        existing.count++;
+        existing.lastTs = Math.max(existing.lastTs, h.timestamp);
+      }
+    }
+
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+
+    const ranked = allRecords.map((r) => {
+      const tfidfScore = r.score;
+
+      let historyBoost = 0;
+      let historyCount = 0;
+      const hist = historyMap.get(r.record.id);
+      if (hist) {
+        historyCount = hist.count;
+        const daysAgo = (now - hist.lastTs) / ONE_DAY;
+        historyBoost = Math.max(0.1, 1.0 - daysAgo / 90);
+      }
+
+      const pathNameScore = computePathNameScore(r.record.path, req.context);
+      const contentOverlap = computeContentOverlap(r.record.textPreview, req.context);
+      const pathMemoryBoost = usedPathSet.has(r.record.path) ? 1 : 0;
+      const hasHistory = historyBoost > 0;
+
+      const weights = tfidfUseful
+        ? (hasHistory
+          ? { tfidf: 0.42, history: 0.28, path: 0.14, content: 0.08, pathMemory: 0.08 }
+          : { tfidf: 0.56, history: 0.00, path: 0.22, content: 0.14, pathMemory: 0.08 })
+        : (hasHistory
+          ? { tfidf: 0.00, history: 0.36, path: 0.30, content: 0.20, pathMemory: 0.14 }
+          : { tfidf: 0.00, history: 0.00, path: 0.44, content: 0.42, pathMemory: 0.14 });
+
+      const finalScore =
+        tfidfScore * weights.tfidf +
+        historyBoost * weights.history +
+        pathNameScore * weights.path +
+        contentOverlap * weights.content +
+        pathMemoryBoost * weights.pathMemory;
+
+      return {
+        ...r,
+        score: finalScore,
+        historyCount,
+        debug: {
+          tfidfScore,
+          historyBoost,
+          pathNameScore,
+          contentOverlap,
+          pathMemoryBoost,
+          weights,
+        },
+      };
+    });
+
+    ranked.sort((a, b) => b.score - a.score);
+    const top = ranked.slice(0, 5).filter((r) => r.score > 0);
+
+    logWorkflowStep(workflowId, "ranking.breakdown.top_candidates", ranked.slice(0, 10).map((r, idx) => ({
+      rank: idx + 1,
+      file: r.record.name,
       path: r.record.path,
-      type: r.record.type,
-      score: r.score,
+      finalScore: roundScore(r.score),
+      tfidfScore: roundScore(r.debug.tfidfScore),
+      historyBoost: roundScore(r.debug.historyBoost),
+      pathNameScore: roundScore(r.debug.pathNameScore),
+      contentOverlap: roundScore(r.debug.contentOverlap),
+      pathMemoryBoost: r.debug.pathMemoryBoost,
       historyCount: r.historyCount,
-    })),
-  };
+      weights: r.debug.weights,
+    })));
+
+    logWorkflowStep(workflowId, "match.services_called", Array.from(servicesCalled));
+    logWorkflowStep(workflowId, "match.done", {
+      candidateCount: ranked.length,
+      returnedCount: top.length,
+      results: top.map((r) => `${r.record.name} (${Math.round(r.score * 100)}%)`),
+    });
+
+    return {
+      type: "MATCH_RESPONSE",
+      workflowId,
+      results: top.map((r) => ({
+        id: r.record.id,
+        name: r.record.name,
+        path: r.record.path,
+        type: r.record.type,
+        score: r.score,
+        historyCount: r.historyCount,
+      })),
+    };
+  } catch (err) {
+    logWorkflowError(workflowId, "match.failed", err);
+    throw err;
+  }
+}
+
+// ---- Helper to read config ----
+
+async function getApiConfig(): Promise<XUploadConfig> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get("xupload_config", (data) => {
+      resolve(data.xupload_config || { apiKey: "", mode: "tfidf" });
+    });
+  });
+}
+
+// ---- Enhanced match (fast/vlm modes using Gemini) ----
+
+async function handleMatchEnhanced(req: MatchRequestEnhanced): Promise<MatchResponse> {
+  const workflowId = req.workflowId || createWorkflowId("match-enhanced-bg");
+  const servicesCalled = new Set<string>(["chrome.storage.local.get:xupload_config"]);
+  logWorkflowStep(workflowId, "match.enhanced.start", {
+    mode: req.mode,
+    hasScreenshot: !!req.screenshotBase64,
+    contextPreview: req.context.slice(0, 140),
+    accept: req.accept || "(none)",
+  });
+
+  const config = await getApiConfig();
+  if (!config.apiKey) {
+    // Fallback to TF-IDF
+    logWorkflowStep(workflowId, "match.enhanced.fallback", { reason: "missing_api_key" });
+    return handleMatch({
+      type: "MATCH_REQUEST",
+      context: req.context,
+      accept: req.accept,
+      pageUrl: req.pageUrl,
+      workflowId,
+    });
+  }
+
+  let queryText = req.context;
+
+  // VLM mode: use screenshot to generate richer description
+  if (req.mode === "vlm" && req.screenshotBase64) {
+    try {
+      servicesCalled.add("gemini.describeWithVLM");
+      logWorkflowStep(workflowId, "service.gemini.describeWithVLM.start");
+      const description = await describeWithVLM(req.screenshotBase64, req.context, config.apiKey);
+      logWorkflowStep(workflowId, "service.gemini.describeWithVLM.done", {
+        descriptionPreview: description.slice(0, 160),
+      });
+      queryText = `${description} ${req.context}`;
+    } catch (err) {
+      logWorkflowError(workflowId, "service.gemini.describeWithVLM.failed", err);
+    }
+  }
+
+  // Get query embedding
+  try {
+    servicesCalled.add("gemini.getEmbedding");
+    logWorkflowStep(workflowId, "service.gemini.getEmbedding.start");
+    const queryVec = await getEmbedding(queryText, config.apiKey);
+
+    servicesCalled.add("vectordb.denseSearch");
+    const results = await denseSearch(queryVec, 5, req.accept);
+    logWorkflowStep(workflowId, "service.vectordb.denseSearch.done", {
+      queryVectorSize: queryVec.length,
+      candidateCount: results.length,
+    });
+
+    if (results.length === 0) {
+      logWorkflowStep(workflowId, "match.enhanced.fallback", { reason: "dense_no_results" });
+      return handleMatch({
+        type: "MATCH_REQUEST",
+        context: req.context,
+        accept: req.accept,
+        pageUrl: req.pageUrl,
+        workflowId,
+      });
+    }
+
+    // Get upload history for scoring
+    let history: UploadHistoryEntry[] = [];
+    if (req.pageUrl) {
+      try {
+        const host = new URL(req.pageUrl).hostname;
+        servicesCalled.add("vectordb.getHistoryByHost");
+        history = await getHistoryByHost(host);
+      } catch { /* ignore */ }
+    }
+    const historyMap = new Map<string, number>();
+    for (const h of history) {
+      historyMap.set(h.fileId, (historyMap.get(h.fileId) || 0) + 1);
+    }
+
+    logWorkflowStep(workflowId, "match.enhanced.services_called", Array.from(servicesCalled));
+    logWorkflowStep(workflowId, "match.enhanced.done", {
+      returnedCount: results.length,
+      top: results.map((r) => `${r.record.name} (${Math.round(r.score * 100)}%)`),
+    });
+
+    return {
+      type: "MATCH_RESPONSE",
+      workflowId,
+      results: results.map((r) => ({
+        id: r.record.id,
+        name: r.record.name,
+        path: r.record.path,
+        type: r.record.type,
+        score: r.score,
+        historyCount: historyMap.get(r.record.id) || 0,
+      })),
+    };
+  } catch (err) {
+    logWorkflowError(workflowId, "match.enhanced.failed", err);
+    // Fallback to TF-IDF
+    return handleMatch({
+      type: "MATCH_REQUEST",
+      context: req.context,
+      accept: req.accept,
+      pageUrl: req.pageUrl,
+      workflowId,
+    });
+  }
 }
 
 interface FileEntry {
@@ -218,39 +488,95 @@ interface FileEntry {
   text: string;
 }
 
-async function handleBuildIndex(files: FileEntry[]) {
-  console.log("[xUpload] BUILD_INDEX:", files.length, "files");
+async function handleBuildIndex(files: FileEntry[], workflowId: string = createWorkflowId("scan-bg")) {
+  const servicesCalled = new Set<string>([
+    "embeddings.tokenize",
+    "embeddings.buildVocabulary",
+    "vectordb.clearAll",
+    "vectordb.upsert",
+    "vectordb.saveVocab",
+    "chrome.storage.local.set:vocab",
+    "vectordb.getCount",
+  ]);
 
-  const allTokens = files.map((f) => tokenize(f.text));
-  buildVocabulary(allTokens);
-
-  await clearAll();
-
-  for (let i = 0; i < files.length; i++) {
-    const f = files[i];
-    const vec = vectorize(allTokens[i]);
-    await upsert({
-      id: f.path,
-      name: f.name,
-      path: f.path,
-      type: f.type,
-      size: f.size,
-      lastModified: f.lastModified,
-      vector: vec,
-      textPreview: f.text.slice(0, 100),
-    });
-  }
-
-  const vocab = exportVocab();
-  await saveVocab(vocab);
-  // Also save to chrome.storage for backward compat
-  await new Promise<void>((resolve) => {
-    chrome.storage.local.set({ vocab }, resolve);
+  logWorkflowStep(workflowId, "scan.background.start", {
+    fileCount: files.length,
+    mode: "full",
   });
 
-  const count = await getCount();
-  console.log("[xUpload] Index built:", count, "files");
-  return { ok: true, count };
+  try {
+    // Phase 1: TF-IDF (always)
+    const allTokens = files.map((f) => tokenize(f.text));
+    buildVocabulary(allTokens);
+    logWorkflowStep(workflowId, "scan.phase.tfidf.done", {
+      tokenizedFiles: allTokens.length,
+    });
+
+    await clearAll();
+    logWorkflowStep(workflowId, "service.vectordb.clearAll.done");
+
+    // Phase 2: Dense embeddings (if API key configured)
+    const config = await getApiConfig();
+    servicesCalled.add("chrome.storage.local.get:xupload_config");
+    let denseVectors: (number[] | undefined)[] = new Array(files.length).fill(undefined);
+
+    if (config.apiKey && config.mode !== "tfidf") {
+      servicesCalled.add("gemini.batchEmbed");
+      logWorkflowStep(workflowId, "service.gemini.batchEmbed.start", {
+        fileCount: files.length,
+        mode: config.mode,
+      });
+      try {
+        const texts = files.map((f) => f.text.slice(0, 2000));
+        const vectors = await batchEmbed(texts, config.apiKey, 10, (done, total) => {
+          logWorkflowStep(workflowId, "service.gemini.batchEmbed.progress", { done, total });
+        });
+        denseVectors = vectors;
+        logWorkflowStep(workflowId, "service.gemini.batchEmbed.done", {
+          vectorCount: vectors.length,
+        });
+      } catch (err) {
+        logWorkflowError(workflowId, "service.gemini.batchEmbed.failed", err);
+      }
+    }
+
+    // Phase 3: Store records
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      const vec = vectorize(allTokens[i]);
+      await upsert({
+        id: f.path,
+        name: f.name,
+        path: f.path,
+        type: f.type,
+        size: f.size,
+        lastModified: f.lastModified,
+        vector: vec,
+        denseVector: denseVectors[i],
+        textPreview: f.text.slice(0, 500),
+      });
+    }
+    logWorkflowStep(workflowId, "service.vectordb.upsert.done", {
+      upserted: files.length,
+    });
+
+    const vocab = exportVocab();
+    await saveVocab(vocab);
+    await new Promise<void>((resolve) => {
+      chrome.storage.local.set({ vocab }, resolve);
+    });
+    logWorkflowStep(workflowId, "service.vocab.persist.done", {
+      termCount: vocab.terms.length,
+    });
+
+    const count = await getCount();
+    logWorkflowStep(workflowId, "scan.background.services_called", Array.from(servicesCalled));
+    logWorkflowStep(workflowId, "scan.background.done", { indexedCount: count });
+    return { ok: true, count, workflowId };
+  } catch (err: any) {
+    logWorkflowError(workflowId, "scan.background.failed", err);
+    return { ok: false, error: err?.message || String(err), workflowId };
+  }
 }
 
 async function handleGetFile(id: string) {
