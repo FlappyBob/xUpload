@@ -4,15 +4,22 @@
 # Bug: error of uploading file
 
 # Improve: seamless file scanning
+- Problem:
+  - Have to click scanning every time
+  - Not persistent: parsed files disappears very fast
 - Scan the whole path:
   - Pro: 
     - have all index to all the files
     - better for long term 
     - Good since we are purely locally
   - Con:
-    - slow since 
+    - slow since all the folders
     - 
 - User config: let user config some folders to scan
+  - Implementation consideration:
+    - When to do rolling scanning: check for file changes
+      - Whenever starting chrome
+      - If chrome kept open, scan every 30sec/5min/10min, etc
 - Track uploading history
   - Let user by default upload with our button so we can track
 
