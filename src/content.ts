@@ -26,11 +26,15 @@ const BADGE_CLASS = "xupload-badge";
 const markedZones = new WeakSet<Element>();
 const resultCache = new WeakMap<HTMLElement, MatchResultItem[]>();
 
+/** Tracks all zone elements we've marked, so we can clean up on disable */
+const allMarkedZoneEls: Set<HTMLElement> = new Set();
+
 let dirHandle: FileSystemDirectoryHandle | null = null;
 let activePanel: HTMLElement | null = null;
 let activeTarget: UploadTarget | null = null;
 let hoverTimer: ReturnType<typeof setTimeout> | null = null;
 let hideTimer: ReturnType<typeof setTimeout> | null = null;
+let extensionEnabled = true;
 
 /* ================================================================== */
 /*  Types                                                              */
@@ -164,6 +168,7 @@ function extractZoneContext(
 function markZone(target: UploadTarget) {
   markedZones.add(target.zone);
   markedZones.add(target.fileInput);
+  allMarkedZoneEls.add(target.zone);
 
   // Highlight
   target.zone.classList.add(ZONE_CLASS);
@@ -181,9 +186,17 @@ function markZone(target: UploadTarget) {
     target.zone.appendChild(badge);
   }
 
-  // Hover handlers
-  target.zone.addEventListener("mouseenter", () => onZoneEnter(target));
-  target.zone.addEventListener("mouseleave", () => onZoneLeave());
+  // Hover handlers (stored so we don't double-bind)
+  const enterHandler = () => {
+    if (!extensionEnabled) return;
+    onZoneEnter(target);
+  };
+  const leaveHandler = () => {
+    if (!extensionEnabled) return;
+    onZoneLeave();
+  };
+  target.zone.addEventListener("mouseenter", enterHandler);
+  target.zone.addEventListener("mouseleave", leaveHandler);
 }
 
 /* ================================================================== */
@@ -1229,21 +1242,78 @@ async function scanFolder(
 }
 
 /* ================================================================== */
+/*  ENABLE / DISABLE                                                   */
+/* ================================================================== */
+
+/** Remove all xUpload visual elements from the page */
+function disableExtension() {
+  extensionEnabled = false;
+
+  // Dismiss any open panel
+  dismissPanel();
+  if (hoverTimer) { clearTimeout(hoverTimer); hoverTimer = null; }
+  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+
+  // Remove highlights and badges from all marked zones
+  for (const zone of allMarkedZoneEls) {
+    zone.classList.remove(ZONE_CLASS);
+    const badge = zone.querySelector(`.${BADGE_CLASS}`);
+    if (badge) badge.remove();
+  }
+}
+
+/** Re-enable: re-add highlights and badges to known zones, scan for new ones */
+function enableExtension() {
+  extensionEnabled = true;
+
+  // Re-highlight existing tracked zones
+  for (const zone of allMarkedZoneEls) {
+    zone.classList.add(ZONE_CLASS);
+    if (!zone.querySelector(`.${BADGE_CLASS}`)) {
+      const badge = document.createElement("span");
+      badge.className = BADGE_CLASS;
+      badge.textContent = "\u26A1 xUpload";
+      zone.appendChild(badge);
+    }
+  }
+
+  // Scan for any new zones that appeared while disabled
+  scanAndMark();
+}
+
+/* ================================================================== */
 /*  INITIALIZATION                                                     */
 /* ================================================================== */
 
 function scanAndMark() {
+  if (!extensionEnabled) return;
   const zones = findUploadZones();
   for (const target of zones) {
     markZone(target);
   }
 }
 
-// Run once immediately
-scanAndMark();
+// Check initial enabled state, then run
+chrome.storage.local.get("xupload_enabled", (data) => {
+  extensionEnabled = data.xupload_enabled !== false; // default: enabled
+  if (extensionEnabled) {
+    scanAndMark();
+  }
+});
 
 // Re-scan when DOM changes
 new MutationObserver(() => scanAndMark()).observe(document.body, {
   childList: true,
   subtree: true,
+});
+
+// React to toggle changes from the popup (via chrome.storage)
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes.xupload_enabled) return;
+  const enabled = changes.xupload_enabled.newValue !== false;
+  if (enabled && !extensionEnabled) {
+    enableExtension();
+  } else if (!enabled && extensionEnabled) {
+    disableExtension();
+  }
 });

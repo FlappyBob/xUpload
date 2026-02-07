@@ -14,11 +14,47 @@
     h1 {
       font-size: 16px;
       font-weight: 600;
-      margin-bottom: 12px;
+      margin: 0;
       display: flex;
       align-items: center;
       gap: 6px;
     }
+    .title-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    /* Toggle switch */
+    .toggle {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 22px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: #ccc;
+      border-radius: 22px;
+      transition: background 0.2s;
+    }
+    .toggle-slider::before {
+      content: "";
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 3px;
+      bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .toggle input:checked + .toggle-slider { background: #4a90d9; }
+    .toggle input:checked + .toggle-slider::before { transform: translateX(18px); }
     .status {
       color: #888;
       font-size: 12px;
@@ -101,7 +137,13 @@
   <link rel="modulepreload" crossorigin href="./workflow.js">
 </head>
 <body>
-  <h1>⚡ xUpload</h1>
+  <div class="title-row">
+    <h1>⚡ xUpload</h1>
+    <label class="toggle" title="Enable / disable xUpload on all pages">
+      <input type="checkbox" id="enableToggle" checked>
+      <span class="toggle-slider"></span>
+    </label>
+  </div>
   <div class="status">Indexed files: <strong id="count">0</strong></div>
   <div class="last-scan" id="lastScan">Never scanned</div>
   <div class="btn-row">

@@ -30,12 +30,14 @@ const autoRescanCheckbox = document.getElementById("autoRescan") as HTMLInputEle
 const rescanIntervalSelect = document.getElementById("rescanInterval") as HTMLSelectElement | null;
 const apiKeyInput = document.getElementById("apiKey") as HTMLInputElement | null;
 const matchModeSelect = document.getElementById("matchMode") as HTMLSelectElement | null;
+const enableToggle = document.getElementById("enableToggle") as HTMLInputElement | null;
 
 // Load initial state
 getCount().then((n) => (countEl.textContent = String(n)));
 loadRescanConfig();
 loadApiConfig();
 showLastScanTime();
+loadEnabledState();
 
 scanBtn.addEventListener("click", async () => {
   const workflowId = createWorkflowId("scan-popup");
@@ -429,3 +431,21 @@ function saveApiConfig() {
 
 if (apiKeyInput) apiKeyInput.addEventListener("change", saveApiConfig);
 if (matchModeSelect) matchModeSelect.addEventListener("change", saveApiConfig);
+
+// ---- Enable / disable toggle ----
+
+function loadEnabledState() {
+  chrome.storage.local.get("xupload_enabled", (data) => {
+    // Default to enabled if not set
+    const enabled = data.xupload_enabled !== false;
+    if (enableToggle) enableToggle.checked = enabled;
+  });
+}
+
+if (enableToggle) {
+  enableToggle.addEventListener("change", () => {
+    const enabled = enableToggle!.checked;
+    chrome.storage.local.set({ xupload_enabled: enabled });
+    // Content scripts react via chrome.storage.onChanged listener — no broadcast needed
+  });
+}
